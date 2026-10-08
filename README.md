@@ -17,7 +17,7 @@ python3 -m xmpp_transport.runtime.app --help
 Create a complete MAX and Telegram configuration with newly generated secrets:
 
 ```bash
-xabber-transport-create-config \
+python3 -m xmpp_transport.runtime.create_config \
   --telegram-api-id 123456 \
   --telegram-api-hash replace-with-telegram-api-hash
 ```
@@ -30,10 +30,14 @@ an existing file unless `--force` is passed. Use `--database-dsn`,
 `--server-domain`, `--component-host`, or `--output` to override defaults.
 
 Backend adapters are discovered from the `xabber_transport.backends` Python
-entry-point group. Validate an installed backend without opening connections:
+entry-point group. Validate a backend directly from the source checkout without
+opening connections:
 
 ```bash
-xabber-transport --config transports.ini --backend telegram --check-config
+python3 -m xmpp_transport.runtime.app \
+  --config transports.ini \
+  --backend telegram \
+  --check-config
 ```
 
 ## Daemon and systemd
@@ -42,9 +46,9 @@ The daemon lifecycle follows `xmpp-transport-max`. Each backend has its own PID
 file and runs as an isolated process:
 
 ```bash
-xabber-transport --config transports.ini --backend max --daemon
-xabber-transport --config transports.ini --backend max --status
-xabber-transport --config transports.ini --backend max --stop
+python3 -m xmpp_transport.runtime.app --config transports.ini --backend max --daemon
+python3 -m xmpp_transport.runtime.app --config transports.ini --backend max --status
+python3 -m xmpp_transport.runtime.app --config transports.ini --backend max --stop
 ```
 
 Without `--pid-file`, PID files are stored as
@@ -80,7 +84,10 @@ python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().
 Then validate the local wiring without opening PostgreSQL, HTTP, or XMPP:
 
 ```bash
-xabber-transport --config transports.ini --backend fake --check-config
+python3 -m xmpp_transport.runtime.app \
+  --config transports.ini \
+  --backend fake \
+  --check-config
 ```
 
 Runtime integrations and their external dependencies will be introduced in
