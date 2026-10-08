@@ -15,7 +15,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="xabber-transport-create-config")
     parser.add_argument("--output", type=Path, default=Path("transports.ini"))
     parser.add_argument("--server-domain", default="example.com")
-    parser.add_argument("--component-host", default="127.0.0.1")
+    parser.add_argument("--server-ip", default="127.0.0.1")
     parser.add_argument("--database-dsn", default=(
         "postgresql://transport_user:transport_password@127.0.0.1:5432/"
         "xmpp_transport"
@@ -39,13 +39,13 @@ def build_config(
         raise ValueError("telegram-api-id must be positive")
     values = {
         "server_domain": _ini_value(args.server_domain, "server-domain"),
-        "component_host": _ini_value(args.component_host, "component-host"),
+        "server_ip": _ini_value(args.server_ip, "server-ip"),
         "database_dsn": _ini_value(args.database_dsn, "database-dsn"),
         "telegram_api_hash": _optional_ini_value(
             args.telegram_api_hash, "telegram-api-hash"
         ),
-        "max_component_secret": secret_factory(48),
-        "telegram_component_secret": secret_factory(48),
+        "max_component_password": secret_factory(48),
+        "telegram_component_password": secret_factory(48),
         "media_url_secret": secret_factory(48),
         "iq_auth_secret": secret_factory(48),
         "credential_key": credential_key or Fernet.generate_key().decode("ascii"),
@@ -54,29 +54,37 @@ def build_config(
         ),
     }
     return """[backend:max]
-component_domain = max.{server_domain}
-component_host = {component_host}
-component_port = 5237
+component_jid = max.{server_domain}
+server_ip = {server_ip}
+server_port = 5237
 component_connect_timeout = 20
-component_secret = {max_component_secret}
+component_password = {max_component_password}
 control_localpart = bot
 server_domain = {server_domain}
 http_host = 127.0.0.1
 http_port = 8089
+qr_storage_dir = data/login_qr/max
+qr_base_url = http://127.0.0.1:8089
+qr_max_age_seconds = 3600
+qr_cleanup_interval_seconds = 3600
 contacts_page_size = 20
 roster_group = MAX
 test_self_messages = false
 
 [backend:telegram]
-component_domain = telegram.{server_domain}
-component_host = {component_host}
-component_port = 5238
+component_jid = telegram.{server_domain}
+server_ip = {server_ip}
+server_port = 5238
 component_connect_timeout = 20
-component_secret = {telegram_component_secret}
+component_password = {telegram_component_password}
 control_localpart = bot
 server_domain = {server_domain}
 http_host = 127.0.0.1
 http_port = 8088
+qr_storage_dir = data/login_qr/telegram
+qr_base_url = http://127.0.0.1:8088
+qr_max_age_seconds = 3600
+qr_cleanup_interval_seconds = 3600
 api_id = {telegram_api_id}
 api_hash = {telegram_api_hash}
 media_url_secret = {media_url_secret}

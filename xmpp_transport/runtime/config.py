@@ -10,9 +10,9 @@ from typing import Mapping, Optional, Sequence
 @dataclass(frozen=True)
 class BackendConfig:
     name: str
-    component_domain: str
+    component_jid: str
     options: Mapping[str, str]
-    component_secret: Optional[str] = field(default=None, repr=False)
+    component_password: Optional[str] = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -112,16 +112,16 @@ def load_config(path: Path) -> RuntimeConfig:
         if not section.startswith("backend:"):
             continue
         name = section.partition(":")[2].strip()
-        domain = _required(parser.get(section, "component_domain", fallback=None), section)
+        domain = _required(parser.get(section, "component_jid", fallback=None), section)
         options = dict(parser.items(section))
-        options.pop("component_domain", None)
-        component_secret = options.pop("component_secret", None)
+        options.pop("component_jid", None)
+        component_password = options.pop("component_password", None)
         backends.append(
             BackendConfig(
                 name=name,
-                component_domain=domain,
+                component_jid=domain,
                 options=options,
-                component_secret=component_secret,
+                component_password=component_password,
             )
         )
 
@@ -154,7 +154,7 @@ def load_config(path: Path) -> RuntimeConfig:
 
 def _required(value: Optional[str], section: str) -> str:
     if value is None or not value.strip():
-        raise ValueError("{} must define component_domain".format(section))
+        raise ValueError("{} must define component_jid".format(section))
     return value.strip()
 
 

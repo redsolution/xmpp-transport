@@ -78,6 +78,7 @@ class ApplicationRuntime:
         sessions: RestorableResource,
         event_bus: ClosableResource,
         gateways: Sequence[StartableResource] = (),
+        background_resources: Sequence[StartableResource] = (),
         managed_resources: Sequence[ClosableResource] = (),
     ) -> None:
         self._health = health
@@ -86,6 +87,7 @@ class ApplicationRuntime:
         self._sessions = sessions
         self._event_bus = event_bus
         self._gateways = tuple(gateways)
+        self._background_resources = tuple(background_resources)
         self._managed_resources = tuple(managed_resources)
         self._started = False
         self._closed = False
@@ -99,6 +101,8 @@ class ApplicationRuntime:
         try:
             await self._health_server.start()
             await self._database.start()
+            for resource in self._background_resources:
+                await resource.start()
             for gateway in self._gateways:
                 await gateway.start()
             await self._sessions.restore()
@@ -115,6 +119,10 @@ class ApplicationRuntime:
         failures = []
         for name, resource in (
             *(("managed_resource", resource) for resource in reversed(self._managed_resources)),
+            *(
+                ("background_resource", resource)
+                for resource in reversed(self._background_resources)
+            ),
             ("sessions", self._sessions),
             ("event_bus", self._event_bus),
             *(("gateway", gateway) for gateway in reversed(self._gateways)),

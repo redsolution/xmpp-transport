@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from typing import Any, Dict, List, Tuple
 
@@ -11,6 +12,9 @@ class FakeRouter:
 
     def add_get(self, path: str, handler: object) -> None:
         self.routes.append((path, handler))
+
+    def add_static(self, path: str, directory: object, **kwargs: object) -> None:
+        self.routes.append((path, directory))
 
 
 class FakeApplication:
@@ -111,6 +115,23 @@ class HealthHttpTests(unittest.IsolatedAsyncioTestCase):
             [path for path, _ in web.application.router.routes],
         )
         await server.close()
+
+    async def test_registers_login_qr_directory(self) -> None:
+        web = FakeWeb()
+        with tempfile.TemporaryDirectory() as directory:
+            server = AiohttpHealthServer(
+                HealthState(),
+                "127.0.0.1",
+                8080,
+                web,
+                qr_storage_dir=directory,
+            )
+            await server.start()
+            self.assertEqual(
+                ["/qr/", "/live", "/ready"],
+                [path for path, _ in web.application.router.routes],
+            )
+            await server.close()
 
     async def test_readiness_changes_response_status(self) -> None:
         health = HealthState()

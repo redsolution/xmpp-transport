@@ -14,7 +14,7 @@ from xmpp_transport.adapters.postgres import (
     PostgresPoolManager,
 )
 from xmpp_transport.adapters.security import FernetCredentialCipher
-from xmpp_transport.adapters.web import AiohttpHealthServer
+from xmpp_transport.adapters.web import AiohttpHealthServer, QrCodeStore
 from xmpp_transport.adapters.xmpp import (
     ComponentSettings,
     ContactAddressCodec,
@@ -87,6 +87,7 @@ class SingleBackendRuntime:
         health_server: AiohttpHealthServer,
         wire: SlixmppComponentWire,
         cipher: FernetCredentialCipher,
+        qr_store: QrCodeStore,
         roster: Optional[XmppRoster] = None,
     ) -> None:
         if plugin.backend_id != BackendId(backend.name):
@@ -99,6 +100,7 @@ class SingleBackendRuntime:
         self._health_server = health_server
         self._wire = wire
         self._cipher = cipher
+        self._qr_store = qr_store
         self._roster = roster
         self._application: Optional[ApplicationRuntime] = None
         self._authentication: Optional[AuthenticationCoordinator] = None
@@ -150,11 +152,11 @@ class SingleBackendRuntime:
         relay = EventSinkRelay()
         sessions = SessionSupervisor(registry, bindings, self._cipher, relay)
 
-        addresses = ContactAddressCodec(self._backend.component_domain)
+        addresses = ContactAddressCodec(self._backend.component_jid)
         codec = XmppMessageCodec()
         control_localpart = self._backend.options.get("control_localpart", "bot")
         server_domain = self._backend.options.get(
-            "server_domain", _server_domain(self._backend.component_domain)
+            "server_domain", _server_domain(self._backend.component_jid)
         )
         transport_namespace = "urn:xabber:transport:{}:1".format(
             self._backend.name
@@ -169,7 +171,7 @@ class SingleBackendRuntime:
             bindings,
             codec,
             server_domain=server_domain,
-            control_jid="{}@{}".format(control_localpart, self._backend.component_domain),
+            control_jid="{}@{}".format(control_localpart, self._backend.component_jid),
             transport_namespace=transport_namespace,
             group_localpart_prefix="{}g".format(self._backend.name),
             member_fallback_prefix=self._backend.name,
@@ -188,7 +190,7 @@ class SingleBackendRuntime:
             self._wire,
             bindings,
             addresses,
-            self._backend.component_domain,
+            self._backend.component_jid,
             server_domain,
             roster_namespace,
             (
@@ -207,7 +209,7 @@ class SingleBackendRuntime:
             XmppGroupManager(
                 self._wire,
                 bindings,
-                self._backend.component_domain,
+                self._backend.component_jid,
                 server_domain,
                 control_localpart,
                 "{}g".format(self._backend.name),
@@ -219,7 +221,7 @@ class SingleBackendRuntime:
         event_bus = InMemoryEventBus(dispatcher)
         relay.bind(event_bus)
         notices = XmppAuthenticationNotices(
-            "{}@{}".format(control_localpart, self._backend.component_domain),
+            "{}@{}".format(control_localpart, self._backend.component_jid),
             bindings,
             self._wire,
             codec,
@@ -234,7 +236,7 @@ class SingleBackendRuntime:
         )
         control = XmppAuthenticationCommands(
             self._plugin.backend_id,
-            self._backend.component_domain,
+            self._backend.component_jid,
             bindings,
             authentication,
             control_localpart=control_localpart,
@@ -247,6 +249,7 @@ class SingleBackendRuntime:
             provider_name=self._backend.name.upper(),
             supports_phone_contact_addition=ContactAdder
             in getattr(self._plugin, "supported_features", ()),
+            qr_store=self._qr_store,
         )
         gateway = XmppDirectMessageGateway(
             self._wire,
@@ -267,6 +270,7 @@ class SingleBackendRuntime:
             sessions,
             event_bus,
             gateways=(gateway,),
+            background_resources=(self._qr_store,),
             managed_resources=(authentication,),
         )
         return application, authentication
@@ -325,22 +329,22 @@ def compose_single_backend(
     if configure_plugin is not None:
         configure_plugin(backend.options)
     secret_environment = backend.options.get(
-        "component_secret_env",
-        "XABBER_TRANSPORT_{}_COMPONENT_SECRET".format(backend.name.upper().replace("-", "_")),
+        "component_password_env",
+        "XABBER_TRANSPORT_{}_COMPONENT_PASSWORD".format(backend.name.upper().replace("-", "_")),
     )
     source = environment if environment is not None else os.environ
-    component_secret = backend.component_secret or source.get(secret_environment)
-    if not component_secret:
+    component_password = backend.component_password or source.get(secret_environment)
+    if not component_password:
         raise ValueError(
-            "XMPP component secret environment variable is not set: {}".format(
+            "XMPP component password environment variable is not set: {}".format(
                 secret_environment
             )
         )
     component = ComponentSettings(
-        domain=backend.component_domain,
-        secret=component_secret,
-        host=backend.options.get("component_host", "127.0.0.1"),
-        port=_positive_int(backend.options.get("component_port", "5347"), "component_port"),
+        domain=backend.component_jid,
+        secret=component_password,
+        host=backend.options.get("server_ip", "127.0.0.1"),
+        port=_positive_int(backend.options.get("server_port", "5347"), "server_port"),
         connect_timeout=_positive_float(
             backend.options.get("component_connect_timeout", "15"),
             "component_connect_timeout",
@@ -355,6 +359,29 @@ def compose_single_backend(
     )
     if http_port > 65535:
         raise ValueError("http_port must be at most 65535")
+    qr_storage_dir = backend.options.get(
+        "qr_storage_dir", "data/login_qr/{}".format(backend.name)
+    ).strip()
+    if not qr_storage_dir:
+        raise ValueError("qr_storage_dir must not be empty")
+    qr_base_url = backend.options.get(
+        "qr_base_url", _default_http_base_url(http_host, http_port)
+    ).strip().rstrip("/")
+    if not qr_base_url.startswith(("http://", "https://")):
+        raise ValueError("qr_base_url must use HTTP or HTTPS")
+    qr_store = QrCodeStore(
+        qr_storage_dir,
+        qr_base_url,
+        backend.name,
+        max_age_seconds=_nonnegative_int(
+            backend.options.get("qr_max_age_seconds", "3600"),
+            "qr_max_age_seconds",
+        ),
+        cleanup_interval_seconds=_positive_int(
+            backend.options.get("qr_cleanup_interval_seconds", "3600"),
+            "qr_cleanup_interval_seconds",
+        ),
+    )
     health = HealthState()
     return SingleBackendRuntime(
         config=config,
@@ -368,9 +395,11 @@ def compose_single_backend(
             http_port,
             media_handler=getattr(plugin, "media_handler", None),
             avatar_handler=getattr(plugin, "avatar_handler", None),
+            qr_storage_dir=qr_storage_dir,
         ),
         wire=SlixmppComponentWire(component),
         cipher=FernetCredentialCipher(config.credential_key(environment)),
+        qr_store=qr_store,
         roster=roster,
     )
 
@@ -383,6 +412,21 @@ def _positive_int(value: str, name: str) -> int:
     if parsed <= 0:
         raise ValueError("{} must be positive".format(name))
     return parsed
+
+
+def _nonnegative_int(value: str, name: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise ValueError("{} must be an integer".format(name)) from None
+    if parsed < 0:
+        raise ValueError("{} must not be negative".format(name))
+    return parsed
+
+
+def _default_http_base_url(host: str, port: int) -> str:
+    public_host = "127.0.0.1" if host in ("", "0.0.0.0", "::") else host
+    return "http://{}:{}".format(public_host, port)
 
 
 def _server_domain(component_domain: str) -> str:

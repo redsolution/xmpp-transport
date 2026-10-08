@@ -26,8 +26,8 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "transport.ini"
             path.write_text(
-                "[backend:telegram]\ncomponent_domain=telegram.example.com\n"
-                "[backend:max]\ncomponent_domain=max.example.com\n",
+                "[backend:telegram]\ncomponent_jid=telegram.example.com\n"
+                "[backend:max]\ncomponent_jid=max.example.com\n",
                 encoding="utf-8",
             )
             config = load_config(path)
@@ -37,7 +37,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "transport.ini"
             path.write_text(
-                "[backend:telegram]\ncomponent_domain=telegram.example.com\n"
+                "[backend:telegram]\ncomponent_jid=telegram.example.com\n"
                 "[database]\ndsn=postgresql://user:secret@db/transport\n"
                 "min_pool_size=2\nmax_pool_size=8\ncommand_timeout=12.5\n"
                 "[security]\ncredential_key_env=TEST_CREDENTIAL_KEY\n",
@@ -54,8 +54,8 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "transport.ini"
             path.write_text(
-                "[backend:max]\ncomponent_domain=max.example.com\n"
-                "component_secret=private-component-secret\n"
+                "[backend:max]\ncomponent_jid=max.example.com\n"
+                "component_password=private-component-secret\n"
                 "[database]\ndsn=postgresql://user:private@db/transport\n"
                 "[security]\ncredential_key=private-fernet-key\n"
                 "iq_auth_secret=private-shared-iq-secret-at-least-32-bytes\n",
@@ -63,7 +63,7 @@ class ConfigTests(unittest.TestCase):
             )
             config = load_config(path)
 
-        self.assertEqual("private-component-secret", config.backends[0].component_secret)
+        self.assertEqual("private-component-secret", config.backends[0].component_password)
         self.assertEqual(b"private-fernet-key", config.credential_key({}))
         self.assertEqual(
             "private-shared-iq-secret-at-least-32-bytes",
@@ -113,7 +113,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "transport.ini"
             path.write_text(
-                "[backend:fake]\ncomponent_domain=fake.example.com\n"
+                "[backend:fake]\ncomponent_jid=fake.example.com\n"
                 "[http]\nhost=0.0.0.0\nport=9090\n",
                 encoding="utf-8",
             )
@@ -137,7 +137,7 @@ class ConfigTests(unittest.TestCase):
             config_path = root / "transport.ini"
             config_path.write_text(
                 "[environment]\nfile=.env\n"
-                "[backend:fake]\ncomponent_domain=fake.example.com\n",
+                "[backend:fake]\ncomponent_jid=fake.example.com\n",
                 encoding="utf-8",
             )
             config = load_config(config_path)
@@ -194,12 +194,14 @@ class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         sessions = OrderedResource("sessions", calls)
         events = OrderedResource("events", calls)
         authentication = OrderedResource("authentication", calls)
+        qr_cleanup = OrderedResource("qr_cleanup", calls)
         runtime = ApplicationRuntime(
             health,
             server,
             database,
             sessions,
             events,
+            background_resources=(qr_cleanup,),
             managed_resources=(authentication,),
         )
 
@@ -212,8 +214,10 @@ class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             [
                 "start:health",
                 "start:database",
+                "start:qr_cleanup",
                 "restore:sessions",
                 "close:authentication",
+                "close:qr_cleanup",
                 "close:sessions",
                 "close:events",
                 "close:database",

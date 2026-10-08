@@ -69,7 +69,7 @@ class CompositionTests(unittest.TestCase):
                     "fake",
                     "fake.example.com",
                     {
-                        "component_secret_env": "FAKE_COMPONENT_SECRET",
+                        "component_password_env": "FAKE_COMPONENT_PASSWORD",
                     },
                 ),
             ),
@@ -81,7 +81,7 @@ class CompositionTests(unittest.TestCase):
             config,
             FakePlugin(),  # type: ignore[arg-type]
             {
-                "FAKE_COMPONENT_SECRET": "component-secret",
+                "FAKE_COMPONENT_PASSWORD": "component-secret",
                 "CREDENTIAL_KEY": key,
             },
         )
@@ -89,7 +89,7 @@ class CompositionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "not initialized"):
             _ = runtime.authentication
 
-    def test_requires_database_and_component_secret(self) -> None:
+    def test_requires_database_and_component_password(self) -> None:
         key = Fernet.generate_key().decode("ascii")
         without_database = RuntimeConfig(
             (BackendConfig("fake", "fake.example.com", {}),),
@@ -110,7 +110,7 @@ class CompositionTests(unittest.TestCase):
                     "fake",
                     "fake.example.com",
                     {
-                        "component_secret_env": "FAKE_COMPONENT_SECRET",
+                        "component_password_env": "FAKE_COMPONENT_PASSWORD",
                         "http_host": "127.0.0.2",
                         "http_port": "9081",
                     },
@@ -126,7 +126,7 @@ class CompositionTests(unittest.TestCase):
             config,
             FakePlugin(),  # type: ignore[arg-type]
             {
-                "FAKE_COMPONENT_SECRET": "component-secret",
+                "FAKE_COMPONENT_PASSWORD": "component-secret",
                 "CREDENTIAL_KEY": key,
             },
         )
@@ -142,7 +142,7 @@ class CompositionTests(unittest.TestCase):
                     "fake",
                     "fake.example.com",
                     {
-                        "component_secret_env": "FAKE_COMPONENT_SECRET",
+                        "component_password_env": "FAKE_COMPONENT_PASSWORD",
                         "http_port": "70000",
                     },
                 ),
@@ -157,7 +157,7 @@ class CompositionTests(unittest.TestCase):
                 config,
                 FakePlugin(),  # type: ignore[arg-type]
                 {
-                    "FAKE_COMPONENT_SECRET": "component-secret",
+                    "FAKE_COMPONENT_PASSWORD": "component-secret",
                     "CREDENTIAL_KEY": key,
                 },
             )
@@ -169,7 +169,7 @@ class CompositionTests(unittest.TestCase):
                 BackendConfig(
                     "fake",
                     "fake.example.com",
-                    {"component_secret_env": "FAKE_COMPONENT_SECRET"},
+                    {"component_password_env": "FAKE_COMPONENT_PASSWORD"},
                 ),
             ),
             database=DatabaseConfig("postgresql://user:private@db/transport"),
@@ -181,7 +181,7 @@ class CompositionTests(unittest.TestCase):
                 config,
                 FakePlugin(),  # type: ignore[arg-type]
                 {
-                    "FAKE_COMPONENT_SECRET": "component-secret",
+                    "FAKE_COMPONENT_PASSWORD": "component-secret",
                     "CREDENTIAL_KEY": key,
                 },
             )

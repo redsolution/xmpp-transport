@@ -440,7 +440,7 @@ class XmppMessageCodec:
             ET.SubElement(file_element, "name").text = media.name
             ET.SubElement(file_element, "size").text = str(media.size)
             sources = ET.SubElement(sharing, "sources")
-            ET.SubElement(sources, "uri").text = media.data_uri
+            ET.SubElement(sources, "uri").text = media.uri
         if button_range is not None:
             reference = ET.SubElement(
                 response,

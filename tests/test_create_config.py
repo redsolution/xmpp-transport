@@ -34,10 +34,18 @@ class CreateConfigTests(unittest.TestCase):
             config = load_config(path)
 
         backends = {backend.name: backend for backend in config.backends}
-        self.assertEqual("5237", backends["max"].options["component_port"])
+        self.assertEqual("5237", backends["max"].options["server_port"])
         self.assertEqual("8089", backends["max"].options["http_port"])
-        self.assertEqual("5238", backends["telegram"].options["component_port"])
+        self.assertEqual("data/login_qr/max", backends["max"].options["qr_storage_dir"])
+        self.assertEqual(
+            "http://127.0.0.1:8089", backends["max"].options["qr_base_url"]
+        )
+        self.assertEqual("5238", backends["telegram"].options["server_port"])
         self.assertEqual("8088", backends["telegram"].options["http_port"])
+        self.assertEqual(
+            "data/login_qr/telegram",
+            backends["telegram"].options["qr_storage_dir"],
+        )
         self.assertEqual("media-secret", backends["telegram"].options["media_url_secret"])
         self.assertEqual("iq-secret", config.iq_auth_secret)
 

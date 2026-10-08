@@ -1,5 +1,6 @@
 """aiohttp liveness and readiness endpoints."""
 
+from pathlib import Path
 from typing import Any, Optional
 
 from xmpp_transport.runtime.health import HealthState
@@ -14,12 +15,14 @@ class AiohttpHealthServer:
         web_module: Optional[Any] = None,
         media_handler: Optional[Any] = None,
         avatar_handler: Optional[Any] = None,
+        qr_storage_dir: Optional[str] = None,
     ) -> None:
         self._health = health
         self._host = host
         self._port = port
         self._media_handler = media_handler
         self._avatar_handler = avatar_handler
+        self._qr_storage_dir = qr_storage_dir
         self._web = web_module
         self._runner: Optional[Any] = None
 
@@ -40,6 +43,12 @@ class AiohttpHealthServer:
         if self._avatar_handler is not None:
             application.router.add_get(
                 "/avatar/{filename}", self._avatar_handler
+            )
+        if self._qr_storage_dir is not None:
+            qr_dir = Path(self._qr_storage_dir)
+            qr_dir.mkdir(parents=True, exist_ok=True)
+            application.router.add_static(
+                "/qr/", qr_dir, name="login_qr", show_index=False
             )
         application.router.add_get("/live", self._live)
         application.router.add_get("/ready", self._ready)

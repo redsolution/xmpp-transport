@@ -53,7 +53,7 @@ class CliConfigurationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "transports.ini"
             path.write_text(
-                "[backend:max]\ncomponent_domain=max.example.com\n",
+                "[backend:max]\ncomponent_jid=max.example.com\n",
                 encoding="utf-8",
             )
             args = parse_args(["--config", str(path), "--backend", "max"])
@@ -67,8 +67,8 @@ class CliConfigurationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "transports.ini"
             path.write_text(
-                "[backend:telegram]\ncomponent_domain=telegram.example.com\n"
-                "[backend:max]\ncomponent_domain=max.example.com\n"
+                "[backend:telegram]\ncomponent_jid=telegram.example.com\n"
+                "[backend:max]\ncomponent_jid=max.example.com\n"
                 "[database]\ndsn=postgresql://db/transport\n"
                 "[security]\n"
                 "iq_auth_secret=shared-roster-iq-secret-at-least-32-bytes\n",
@@ -86,7 +86,7 @@ class CliConfigurationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "custom.ini"
             path.write_text(
-                "[backend:fake]\ncomponent_domain=fake.example.com\n",
+                "[backend:fake]\ncomponent_jid=fake.example.com\n",
                 encoding="utf-8",
             )
             args = parse_args([])
@@ -97,8 +97,8 @@ class CliConfigurationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "transports.ini"
             path.write_text(
-                "[backend:one]\ncomponent_domain=one.example.com\n"
-                "[backend:two]\ncomponent_domain=two.example.com\n",
+                "[backend:one]\ncomponent_jid=one.example.com\n"
+                "[backend:two]\ncomponent_jid=two.example.com\n",
                 encoding="utf-8",
             )
             args = parse_args(["--config", str(path)])

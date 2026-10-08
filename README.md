@@ -27,7 +27,12 @@ Both Telegram API arguments are optional. When omitted, the command leaves
 
 The command creates `transports.ini` with mode `0600`. It refuses to overwrite
 an existing file unless `--force` is passed. Use `--database-dsn`,
-`--server-domain`, `--component-host`, or `--output` to override defaults.
+`--server-domain`, `--server-ip`, or `--output` to override defaults.
+
+Login QR codes are generated as SVG files without Pillow, stored under each
+backend's `qr_storage_dir`, and served by the transport at `/qr/`. Set
+`qr_base_url` to the externally reachable HTTP base URL. Expired files are
+removed according to `qr_max_age_seconds` and `qr_cleanup_interval_seconds`.
 
 Backend adapters are discovered from the `xabber_transport.backends` Python
 entry-point group. Validate a backend directly from the source checkout without

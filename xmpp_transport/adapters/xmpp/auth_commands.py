@@ -1,12 +1,7 @@
 """XMPP control-chat commands for provider authentication."""
 
-import base64
-import io
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
-
-import qrcode
-import qrcode.image.svg
+from typing import Optional, Protocol, Sequence
 
 from xmpp_transport.application.authentication import AuthenticationCoordinator
 from xmpp_transport.domain.auth import AuthChallenge, AuthResponse, AuthResponseKind, AuthState
@@ -22,8 +17,31 @@ from .addressing import bare_jid
 class ControlMedia:
     name: str
     mime_type: str
-    data_uri: str = field(repr=False)
+    uri: str = field(repr=False)
     size: int
+
+
+class StoredQrImage(Protocol):
+    @property
+    def url(self) -> str:
+        ...
+
+    @property
+    def name(self) -> str:
+        ...
+
+    @property
+    def mime_type(self) -> str:
+        ...
+
+    @property
+    def size(self) -> int:
+        ...
+
+
+class QrImageStore(Protocol):
+    def create(self, value: str) -> StoredQrImage:
+        ...
 
 
 @dataclass(frozen=True)
@@ -70,6 +88,7 @@ class XmppAuthenticationCommands:
         contacts_page_size: int = 20,
         provider_name: Optional[str] = None,
         supports_phone_contact_addition: bool = False,
+        qr_store: Optional[QrImageStore] = None,
     ) -> None:
         self._backend_id = backend_id
         self._provider_name = provider_name or str(backend_id).upper()
@@ -86,6 +105,7 @@ class XmppAuthenticationCommands:
         self._roster = roster
         self._contacts_page_size = contacts_page_size
         self._supports_phone_contact_addition = supports_phone_contact_addition
+        self._qr_store = qr_store
 
     def accepts(self, to_jid: str) -> bool:
         return to_jid.split("/", 1)[0].strip().lower() == self._control_jid
@@ -152,12 +172,14 @@ class XmppAuthenticationCommands:
         if challenge.state is AuthState.WAITING_QR:
             if not challenge.public_url:
                 return self._response("MAX не вернул данные для QR-кода.")
+            if self._qr_store is None:
+                raise RuntimeError("login QR storage is not configured")
             return ControlResponse(
                 self._provider_text(
                     "Отсканируйте QR-код приложением MAX.\n"
                     "После подтверждения transport сообщит о результате здесь."
                 ),
-                (_qr_svg(challenge.public_url),),
+                (_qr_media(self._qr_store.create(challenge.public_url)),),
                 buttons=self._main_menu_buttons(),
             )
         if challenge.state is AuthState.WAITING_PASSWORD:
@@ -372,15 +394,10 @@ class XmppAuthenticationNotices:
         )
 
 
-def _qr_svg(value: str) -> ControlMedia:
-    image = qrcode.make(value, image_factory=qrcode.image.svg.SvgPathImage)
-    stream = io.BytesIO()
-    image.save(stream)
-    content = stream.getvalue()
-    encoded = base64.b64encode(content).decode("ascii")
+def _qr_media(image: StoredQrImage) -> ControlMedia:
     return ControlMedia(
-        name="max-login-qr.svg",
-        mime_type="image/svg+xml",
-        data_uri="data:image/svg+xml;base64,{}".format(encoded),
-        size=len(content),
+        name=image.name,
+        mime_type=image.mime_type,
+        uri=image.url,
+        size=image.size,
     )

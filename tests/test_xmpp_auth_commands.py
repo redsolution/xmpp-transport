@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 from xmpp_transport.adapters.xmpp.auth_commands import (
     XmppAuthenticationCommands,
@@ -90,6 +91,17 @@ class Wire:
         self.sent.append(stanza)
 
 
+class QrStore:
+    def create(self, value):  # type: ignore[no-untyped-def]
+        self.value = value
+        return SimpleNamespace(
+            url="https://transport.example/qr/max-login-qr-test.svg",
+            name="max-login-qr-test.svg",
+            mime_type="image/svg+xml",
+            size=123,
+        )
+
+
 class XmppAuthenticationCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_login_creates_attempt_for_owner_binding(self) -> None:
         bindings = Bindings()
@@ -99,6 +111,7 @@ class XmppAuthenticationCommandTests(unittest.IsolatedAsyncioTestCase):
             "max.example.com",
             bindings,  # type: ignore[arg-type]
             authentication,  # type: ignore[arg-type]
+            qr_store=QrStore(),  # type: ignore[arg-type]
         )
 
         response = await commands.handle("user@example.com/device", "/login")
@@ -115,8 +128,9 @@ class XmppAuthenticationCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("/continue", response.body)
         self.assertIn("сообщит о результате", response.body)
         self.assertEqual("image/svg+xml", response.media[0].mime_type)
-        self.assertTrue(
-            response.media[0].data_uri.startswith("data:image/svg+xml;base64,")
+        self.assertEqual(
+            "https://transport.example/qr/max-login-qr-test.svg",
+            response.media[0].uri,
         )
 
     async def test_status_does_not_start_authentication(self) -> None:
