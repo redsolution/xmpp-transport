@@ -2,11 +2,15 @@
 
 import asyncio
 import inspect
+import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from xml.etree import ElementTree as ET
 
 from .gateway import MessageHandler
+
+log = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class ComponentSettings:
@@ -15,6 +19,7 @@ class ComponentSettings:
     host: str = "127.0.0.1"
     port: int = 5347
     connect_timeout: float = 15.0
+    reconnect_delay: float = 5.0
 
     def __post_init__(self) -> None:
         if not self.domain.strip() or not self.secret:
@@ -23,16 +28,25 @@ class ComponentSettings:
             raise ValueError("component endpoint is invalid")
         if self.connect_timeout <= 0:
             raise ValueError("component connect_timeout must be positive")
+        if self.reconnect_delay <= 0:
+            raise ValueError("component reconnect_delay must be positive")
 
 
 class SlixmppComponentWire:
-    def __init__(self, settings: ComponentSettings) -> None:
+    def __init__(
+        self,
+        settings: ComponentSettings,
+        client_factory: Optional[Callable[..., Any]] = None,
+    ) -> None:
         self._settings = settings
+        self._client_factory = client_factory
         self._handler: Optional[MessageHandler] = None
         self._client: Optional[Any] = None
         # asyncio primitives bind to the current loop on Python 3.9. Runtime
         # composition is synchronous, so create the event lazily in start().
         self._ready: Optional[asyncio.Event] = None
+        self._disconnected: Optional[asyncio.Event] = None
+        self._connection_task: Optional[asyncio.Task[None]] = None
         self._closed = False
 
     def set_message_handler(self, handler: MessageHandler) -> None:
@@ -43,41 +57,20 @@ class SlixmppComponentWire:
     async def start(self) -> None:
         if self._closed:
             raise RuntimeError("XMPP component wire is closed")
-        if self._client is not None:
+        if self._connection_task is not None:
             return
         if self._handler is None:
             raise RuntimeError("XMPP message handler is not configured")
 
-        ready = asyncio.Event()
-        self._ready = ready
-
-        from slixmpp import ComponentXMPP
-
-        client = ComponentXMPP(
-            self._settings.domain,
-            self._settings.secret,
-            self._settings.host,
-            self._settings.port,
+        self._ready = asyncio.Event()
+        self._disconnected = asyncio.Event()
+        task = asyncio.create_task(
+            self._connection_loop(),
+            name="xmpp-component-connection",
         )
-        client.add_event_handler("session_start", self._on_session_start)
-        client.add_event_handler("disconnected", self._on_disconnected)
-        client.add_event_handler("message", self._on_message)
-        self._client = client
-        try:
-            connected = client.connect()
-            if inspect.isawaitable(connected):
-                connected = await connected
-            if connected is False:
-                raise ConnectionError("XMPP component connection was rejected")
-            await asyncio.wait_for(
-                ready.wait(), timeout=self._settings.connect_timeout
-            )
-        except BaseException:
-            self._client = None
-            disconnect_result = client.disconnect()
-            if inspect.isawaitable(disconnect_result):
-                await disconnect_result
-            raise
+        self._connection_task = task
+        # Do not restore backend sessions until XMPP can accept their events.
+        await self._ready.wait()
 
     async def send(self, element: ET.Element) -> None:
         client = self._client
@@ -136,12 +129,15 @@ class SlixmppComponentWire:
         ready = self._ready
         if ready is not None:
             ready.clear()
-        client = self._client
-        self._client = None
-        if client is not None:
-            result = client.disconnect()
-            if inspect.isawaitable(result):
-                await result
+        disconnected = self._disconnected
+        if disconnected is not None:
+            disconnected.set()
+        task = self._connection_task
+        self._connection_task = None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await self._disconnect_client()
 
     async def _on_session_start(self, event: object) -> None:
         if self._ready is not None:
@@ -150,7 +146,81 @@ class SlixmppComponentWire:
     def _on_disconnected(self, event: object) -> None:
         if self._ready is not None:
             self._ready.clear()
+        if self._disconnected is not None:
+            self._disconnected.set()
 
     async def _on_message(self, stanza: Any) -> None:
         if self._handler is not None:
             await self._handler(stanza.xml)
+
+    async def _connection_loop(self) -> None:
+        while not self._closed:
+            try:
+                await self._connect_once()
+                assert self._disconnected is not None
+                await self._disconnected.wait()
+                log.warning(
+                    "XMPP component disconnected domain=%s; reconnecting",
+                    self._settings.domain,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning(
+                    "XMPP component connection failed domain=%s host=%s port=%s "
+                    "exception_type=%s; retrying in %.1f seconds",
+                    self._settings.domain,
+                    self._settings.host,
+                    self._settings.port,
+                    type(exc).__name__,
+                    self._settings.reconnect_delay,
+                )
+            finally:
+                if self._ready is not None:
+                    self._ready.clear()
+                await self._disconnect_client()
+            if not self._closed:
+                await asyncio.sleep(self._settings.reconnect_delay)
+
+    async def _connect_once(self) -> None:
+        factory = self._client_factory
+        if factory is None:
+            from slixmpp import ComponentXMPP
+
+            factory = ComponentXMPP
+        assert self._ready is not None
+        assert self._disconnected is not None
+        self._disconnected.clear()
+        client = factory(
+            self._settings.domain,
+            self._settings.secret,
+            self._settings.host,
+            self._settings.port,
+        )
+        client.add_event_handler("session_start", self._on_session_start)
+        client.add_event_handler("disconnected", self._on_disconnected)
+        client.add_event_handler("message", self._on_message)
+        self._client = client
+        connected = client.connect()
+        if inspect.isawaitable(connected):
+            connected = await connected
+        if connected is False:
+            raise ConnectionError("XMPP component connection was rejected")
+        await asyncio.wait_for(
+            self._ready.wait(), timeout=self._settings.connect_timeout
+        )
+        log.info(
+            "XMPP component connected domain=%s host=%s port=%s",
+            self._settings.domain,
+            self._settings.host,
+            self._settings.port,
+        )
+
+    async def _disconnect_client(self) -> None:
+        client = self._client
+        self._client = None
+        if client is None:
+            return
+        result = client.disconnect()
+        if inspect.isawaitable(result):
+            await result

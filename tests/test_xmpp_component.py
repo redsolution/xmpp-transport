@@ -31,7 +31,79 @@ class FakeClient:
         self.raw.append(value)
 
 
+class ConnectingClient(FakeClient):
+    def __init__(self, connect_result=True) -> None:  # type: ignore[no-untyped-def]
+        super().__init__()
+        self.connect_result = connect_result
+        self.handlers = {}
+        self.disconnected = 0
+
+    def add_event_handler(self, name, handler) -> None:  # type: ignore[no-untyped-def]
+        self.handlers[name] = handler
+
+    def connect(self):  # type: ignore[no-untyped-def]
+        if self.connect_result is True:
+            asyncio.get_running_loop().call_soon(
+                lambda: asyncio.create_task(self.handlers["session_start"](None))
+            )
+        return self.connect_result
+
+    def disconnect(self) -> None:
+        self.disconnected += 1
+
+    def lose_connection(self) -> None:
+        self.handlers["disconnected"](None)
+
+
 class SlixmppComponentWireTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retries_initial_connection_failure(self) -> None:
+        clients = []
+
+        def factory(*args):  # type: ignore[no-untyped-def]
+            client = ConnectingClient(False if not clients else True)
+            clients.append(client)
+            return client
+
+        wire = SlixmppComponentWire(
+            ComponentSettings(
+                "max.example", "secret", connect_timeout=0.05, reconnect_delay=0.01
+            ),
+            client_factory=factory,
+        )
+        wire.set_message_handler(lambda stanza: asyncio.sleep(0))
+
+        await asyncio.wait_for(wire.start(), timeout=0.5)
+
+        self.assertEqual(2, len(clients))
+        self.assertGreaterEqual(clients[0].disconnected, 1)
+        await wire.close()
+
+    async def test_reconnects_after_disconnect(self) -> None:
+        clients = []
+
+        def factory(*args):  # type: ignore[no-untyped-def]
+            client = ConnectingClient()
+            clients.append(client)
+            return client
+
+        wire = SlixmppComponentWire(
+            ComponentSettings(
+                "max.example", "secret", connect_timeout=0.05, reconnect_delay=0.01
+            ),
+            client_factory=factory,
+        )
+        wire.set_message_handler(lambda stanza: asyncio.sleep(0))
+        await wire.start()
+
+        clients[0].lose_connection()
+        for _attempt in range(20):
+            if len(clients) >= 2:
+                break
+            await asyncio.sleep(0.01)
+
+        self.assertEqual(2, len(clients))
+        await wire.close()
+
     async def test_sends_message_through_slixmpp_stanza_api(self) -> None:
         wire = SlixmppComponentWire(ComponentSettings("max.example", "secret"))
         client = FakeClient()

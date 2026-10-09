@@ -150,10 +150,21 @@ async def serve_runtime(
                 installed.append(signum)
             except (NotImplementedError, RuntimeError):
                 break
+    startup = asyncio.create_task(runtime.start(), name="runtime-startup")
+    shutdown = asyncio.create_task(stop.wait(), name="runtime-shutdown-signal")
     try:
-        await runtime.start()
-        await stop.wait()
+        done, _pending = await asyncio.wait(
+            (startup, shutdown), return_when=asyncio.FIRST_COMPLETED
+        )
+        if startup in done:
+            await startup
+            await shutdown
+        else:
+            startup.cancel()
+            await asyncio.gather(startup, return_exceptions=True)
     finally:
+        shutdown.cancel()
+        await asyncio.gather(shutdown, return_exceptions=True)
         for signum in installed:
             loop.remove_signal_handler(signum)
         await runtime.close()

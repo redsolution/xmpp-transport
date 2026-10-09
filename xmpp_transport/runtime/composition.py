@@ -349,6 +349,10 @@ def compose_single_backend(
             backend.options.get("component_connect_timeout", "15"),
             "component_connect_timeout",
         ),
+        reconnect_delay=_positive_float(
+            backend.options.get("component_reconnect_delay", "5"),
+            "component_reconnect_delay",
+        ),
     )
     http_host = backend.options.get("http_host", config.http.host).strip()
     if not http_host:

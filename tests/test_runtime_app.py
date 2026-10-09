@@ -163,6 +163,35 @@ class ServeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual((1, 1), (runtime.started, runtime.closed))
 
+    async def test_shutdown_cancels_startup_waiting_for_connection(self) -> None:
+        class WaitingRuntime(FakeRuntime):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cancelled = False
+
+            async def start(self) -> None:
+                self.started += 1
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    self.cancelled = True
+
+        runtime = WaitingRuntime()
+        shutdown = asyncio.Event()
+        task = asyncio.create_task(
+            serve_runtime(
+                runtime,  # type: ignore[arg-type]
+                shutdown_event=shutdown,
+                install_signal_handlers=False,
+            )
+        )
+        await asyncio.sleep(0)
+        shutdown.set()
+        await task
+
+        self.assertTrue(runtime.cancelled)
+        self.assertEqual((1, 1), (runtime.started, runtime.closed))
+
     async def test_start_failure_still_closes_runtime(self) -> None:
         class FailingRuntime(FakeRuntime):
             async def start(self) -> None:
