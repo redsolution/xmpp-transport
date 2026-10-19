@@ -31,6 +31,8 @@ Both Telegram API arguments are optional. When omitted, the command leaves
 
 Each file contains only the selected backend plus shared database and security
 settings. Omit `--backend` to generate both backends in one file as before.
+For manual setup, use `max.example.ini` or `telegram.example.ini` as the
+template for the corresponding private config file.
 When deploying separate files against the same database, keep the same
 `credential_key` in both files and preserve it across configuration updates.
 Set `iq_auth_secret` to match the server roster helper configuration.
@@ -94,9 +96,9 @@ sudo systemctl status xabber-transport@max xabber-transport@telegram
 ## Local smoke backend
 
 The built-in `fake` backend echoes an outbound direct message back through the
-normal backend event, deduplication, and XMPP delivery path. Copy
-`transports.example.ini`, set the two referenced environment variables, and
-create an active fake binding with an encrypted non-empty credential payload.
+normal backend event, deduplication, and XMPP delivery path. Create a
+`[backend:fake]` configuration, then create an active fake binding with an
+encrypted non-empty credential payload.
 
 Generate a Fernet key once and store it in the configured secret manager:
 

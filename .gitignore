@@ -6,7 +6,8 @@ __pycache__/
 .venv/
 .env
 *.ini
-!transports.example.ini
+!max.example.ini
+!telegram.example.ini
 data/
 build/
 dist/
