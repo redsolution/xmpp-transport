@@ -148,7 +148,6 @@ class AsyncpgBindingRepository:
             FROM backend_bindings AS binding
             JOIN xmpp_accounts AS account ON account.id = binding.xmpp_account_id
             WHERE binding.binding_id = $1
-              AND binding.status IN ('pending', 'active', 'authorization_lost')
             """,
             str(binding_id),
         )

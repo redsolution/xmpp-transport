@@ -142,7 +142,7 @@ class BindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual("user@example.com", owner)
-        self.assertIn("'pending'", pool.calls[0][0])
+        self.assertNotIn("binding.status", pool.calls[0][0])
 
 
 class MessageMappingRepositoryTests(unittest.IsolatedAsyncioTestCase):

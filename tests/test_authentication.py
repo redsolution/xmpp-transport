@@ -112,6 +112,34 @@ class AuthenticationCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(1, first.closed)
 
+    async def test_notification_failure_does_not_fail_completed_login(self) -> None:
+        binding_id = BindingId("binding-1")
+        backend_id = BackendId("max")
+
+        async def fail_notification(_binding_id, _challenge):  # type: ignore[no-untyped-def]
+            raise LookupError("owner lookup failed")
+
+        self.coordinator._challenge_handler = fail_notification
+
+        with self.assertLogs(
+            "xmpp_transport.application.authentication", level="ERROR"
+        ) as captured:
+            challenge = await self.coordinator.begin(binding_id, backend_id)
+            for _attempt in range(20):
+                if binding_id not in self.coordinator._tasks:
+                    break
+                await asyncio.sleep(0)
+
+        self.assertEqual(AuthState.WAITING_QR, challenge.state)
+        self.assertEqual(
+            [(binding_id, backend_id, b"encrypted:private")], self.bindings.saved
+        )
+        self.assertEqual([(binding_id, backend_id)], self.sessions.started)
+        self.assertNotIn(binding_id, self.coordinator._tasks)
+        self.assertTrue(
+            any("Authentication notification failed" in line for line in captured.output)
+        )
+
     async def test_close_closes_active_flows(self) -> None:
         await self.coordinator.begin(BindingId("binding-1"), BackendId("max"))
         flow = self.plugin.flows[0]

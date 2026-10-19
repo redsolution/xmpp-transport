@@ -144,35 +144,56 @@ class AuthenticationCoordinator:
         self, binding_id: BindingId, backend_id: BackendId
     ) -> None:
         try:
-            challenge = await self.respond(
-                binding_id,
-                backend_id,
-                AuthResponse(AuthResponseKind.CONFIRMATION, "provider-confirmation"),
-            )
-            if self._challenge_handler is not None:
-                await self._challenge_handler(binding_id, challenge)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log.error(
-                "Automatic authentication continuation failed backend_id=%s "
-                "binding_id=%s exception_type=%s",
-                backend_id,
-                binding_id,
-                type(exc).__name__,
-            )
-            if self._challenge_handler is not None:
-                await self._challenge_handler(
+            try:
+                challenge = await self.respond(
                     binding_id,
-                    AuthChallenge(
-                        AuthState.FAILED,
-                        message="Авторизация завершилась с ошибкой. Повторите /login.",
-                    ),
+                    backend_id,
+                    AuthResponse(AuthResponseKind.CONFIRMATION, "provider-confirmation"),
                 )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.error(
+                    "Automatic authentication continuation failed backend_id=%s "
+                    "binding_id=%s exception_type=%s",
+                    backend_id,
+                    binding_id,
+                    type(exc).__name__,
+                )
+                challenge = AuthChallenge(
+                    AuthState.FAILED,
+                    message="Авторизация завершилась с ошибкой. Повторите /login.",
+                )
+            await self._deliver_challenge(binding_id, backend_id, challenge)
         finally:
             current = asyncio.current_task()
             if self._tasks.get(binding_id) is current:
                 self._tasks.pop(binding_id, None)
+
+    async def _deliver_challenge(
+        self,
+        binding_id: BindingId,
+        backend_id: BackendId,
+        challenge: AuthChallenge,
+    ) -> None:
+        if self._challenge_handler is None:
+            return
+        try:
+            await self._challenge_handler(binding_id, challenge)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Authentication state and credentials are already committed here.
+            # A notification failure must not turn a successful login into a
+            # failed flow or escape from this background task.
+            log.error(
+                "Authentication notification failed backend_id=%s binding_id=%s "
+                "state=%s exception_type=%s",
+                backend_id,
+                binding_id,
+                challenge.state.value,
+                type(exc).__name__,
+            )
 
     async def _cancel_task(self, binding_id: BindingId) -> None:
         task = self._tasks.pop(binding_id, None)
