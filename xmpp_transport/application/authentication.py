@@ -85,8 +85,17 @@ class AuthenticationCoordinator:
         backend_id: BackendId,
         response: AuthResponse,
     ) -> AuthChallenge:
+        log.debug(
+            "Authentication response received backend_id=%s binding_id=%s kind=%s state=%s",
+            backend_id, binding_id, response.kind.value,
+            self._states.get(binding_id).value if binding_id in self._states else "missing",
+        )
         lock = await self._lock_for(binding_id)
         async with lock:
+            log.debug(
+                "Authentication response lock acquired backend_id=%s binding_id=%s kind=%s",
+                backend_id, binding_id, response.kind.value,
+            )
             self._ensure_open()
             managed = self._flows.get(binding_id)
             if managed is None:
@@ -95,6 +104,10 @@ class AuthenticationCoordinator:
                 raise InvalidCommand("authentication flow belongs to another backend")
             flow = managed.flow
             challenge = await flow.respond(response)
+            log.debug(
+                "Authentication response completed backend_id=%s binding_id=%s state=%s",
+                backend_id, binding_id, challenge.state.value,
+            )
             self._states[binding_id] = challenge.state
             if challenge.state is AuthState.CONNECTED:
                 plaintext = flow.credentials()

@@ -120,6 +120,8 @@ class XmppDirectMessageGateway:
                 callback = stanza.find("{{{}}}callback".format(BOT_UI_NS))
                 if callback is not None and callback.attrib.get("data"):
                     body = callback.attrib["data"]
+                if body.strip().lower().startswith("/password"):
+                    log.debug("XMPP control password stanza received")
                 response = await self._control.handle(
                     stanza.attrib.get("from", ""),
                     body,

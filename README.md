@@ -44,6 +44,14 @@ backend's `qr_storage_dir`, and served by the transport at `/qr/`. Set
 `qr_base_url` to the externally reachable HTTP base URL. Expired files are
 removed according to `qr_max_age_seconds` and `qr_cleanup_interval_seconds`.
 
+Authentication diagnostics are written at DEBUG level to
+`logs/xabber_transport_<backend>.log` (or the backend's `log_file` setting).
+The file is private (`0600`) and rotates at 10 MiB with three backups.
+Password commands and MAX API replies are logged as stages and result flags;
+passwords, response bodies, tokens, and QR links are not logged. Restart the
+transport after updating the code, then inspect the MAX log while repeating
+`/login` and `/password`.
+
 Backend adapters are discovered from the `xabber_transport.backends` Python
 entry-point group. Validate a backend directly from the source checkout without
 opening connections:

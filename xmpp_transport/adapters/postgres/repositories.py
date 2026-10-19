@@ -49,7 +49,14 @@ class AsyncpgBindingRepository:
                 SELECT $3, account.id, $4, 'pending'
                 FROM account
                 ON CONFLICT (xmpp_account_id, backend_id) DO UPDATE
-                SET updated_at = CURRENT_TIMESTAMP
+                -- A new /login must reactivate a binding disabled by /logout.
+                -- Keep active and authorization_lost states until the new
+                -- credentials have actually been saved.
+                SET status = CASE
+                        WHEN backend_bindings.status = 'disabled' THEN 'pending'
+                        ELSE backend_bindings.status
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
                 RETURNING binding_id, backend_id
             )
             SELECT binding_id, backend_id FROM binding

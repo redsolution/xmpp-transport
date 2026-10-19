@@ -1,5 +1,6 @@
 """XMPP control-chat commands for provider authentication."""
 
+import logging
 from dataclasses import dataclass, field
 from typing import Optional, Protocol, Sequence
 
@@ -12,6 +13,8 @@ from xmpp_transport.ports.xmpp import XmppRoster
 
 from .addressing import bare_jid
 
+
+log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ControlMedia:
@@ -138,6 +141,11 @@ class XmppAuthenticationCommands:
             return self._response(await self._add(owner, argument))
         if command_name not in ("/login", "/password"):
             return self._response("Неизвестная команда.\n\n" + self.help_text())
+        if command_name == "/password":
+            log.debug(
+                "XMPP password command received backend_id=%s has_password=%s form=%s",
+                self._backend_id, bool(argument), bool(form_fields),
+            )
         if command_name == "/login":
             binding = await self._bindings.ensure_binding(owner, self._backend_id)
             challenge = await self._authentication.begin(
@@ -148,8 +156,15 @@ class XmppAuthenticationCommands:
                 owner, self._backend_id
             )
             if binding is None:
+                log.debug("XMPP password binding unavailable backend_id=%s", self._backend_id)
                 raise LookupError("binding is not available for authentication")
         if command_name == "/password":
+            log.debug(
+                "XMPP password binding found backend_id=%s binding_id=%s state=%s",
+                self._backend_id, binding.binding_id,
+                self._authentication.state(binding.binding_id).value
+                if self._authentication.state(binding.binding_id) is not None else "missing",
+            )
             if not argument:
                 binding = await self._bindings.binding_for_authentication(
                     owner, self._backend_id
@@ -168,6 +183,10 @@ class XmppAuthenticationCommands:
                 binding.binding_id,
                 self._backend_id,
                 AuthResponse(AuthResponseKind.PASSWORD, argument),
+            )
+            log.debug(
+                "XMPP password command completed backend_id=%s binding_id=%s state=%s",
+                self._backend_id, binding.binding_id, challenge.state.value,
             )
         if challenge.state is AuthState.WAITING_QR:
             if not challenge.public_url:

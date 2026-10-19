@@ -4,6 +4,7 @@ The network client is intentionally introduced behind this boundary so MAX
 wire details do not leak into the application and domain packages.
 """
 
+import logging
 import hashlib
 import json
 from dataclasses import dataclass
@@ -54,6 +55,9 @@ from .models import (
     MaxIncomingMessage,
     MaxMedia,
 )
+
+
+log = logging.getLogger(__name__)
 
 
 class MaxClient(Protocol):
@@ -195,16 +199,19 @@ class MaxAuthenticationFlow:
             raise InvalidCommand("MAX authentication flow has not been started")
         try:
             if response.kind.value == "password":
+                log.debug("MAX flow submitting password to API")
                 values = await self._client.submit_password(response.secret)
             else:
                 values = await self._client.wait_for_credentials()
         except self._password_required_error:
+            log.debug("MAX flow entered waiting_password state")
             return AuthChallenge(
                 AuthState.WAITING_PASSWORD,
                 message="MAX requires a two-factor authentication password",
             )
         except self._login_error as exc:
             if response.kind.value == "password":
+                log.warning("MAX password rejected exception_type=%s", type(exc).__name__)
                 return AuthChallenge(
                     AuthState.WAITING_PASSWORD,
                     message="MAX password was not accepted",

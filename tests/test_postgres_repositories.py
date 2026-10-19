@@ -48,6 +48,8 @@ class BindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
         query, arguments = pool.calls[0]
         self.assertIn("ON CONFLICT (bare_jid)", query)
         self.assertIn("ON CONFLICT (xmpp_account_id, backend_id)", query)
+        self.assertIn("WHEN backend_bindings.status = 'disabled' THEN 'pending'", query)
+        self.assertIn("ELSE backend_bindings.status", query)
         self.assertEqual("user@example.com", arguments[1])
         self.assertEqual("max", arguments[3])
 

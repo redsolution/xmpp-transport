@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import re
 import time
 import uuid
@@ -9,6 +10,8 @@ from typing import Optional
 
 import aiohttp
 
+
+log = logging.getLogger(__name__)
 
 OP_HANDSHAKE = 6
 OP_CHECK_PASSWORD = 115
@@ -85,10 +88,12 @@ class MaxPersonalLoginClient:
 
     async def request(self, opcode: int, payload: dict) -> dict:
         if self.ws is None or self.ws.closed:
+            log.debug("MAX auth request skipped opcode=%s reason=websocket_closed", opcode)
             raise MaxLoginError("MAX WebSocket is not connected")
 
         seq = self.seq
         self.seq += 1
+        log.debug("MAX auth request sent opcode=%s seq=%s", opcode, seq)
         await self.ws.send_json(
             {
                 "ver": 11,
@@ -102,12 +107,30 @@ class MaxPersonalLoginClient:
         while True:
             message = await self.ws.receive()
             if message.type != aiohttp.WSMsgType.TEXT:
+                log.debug("MAX auth socket closed opcode=%s seq=%s frame_type=%s", opcode, seq, message.type)
                 raise MaxLoginError("MAX WebSocket closed during authorization")
             frame = json.loads(message.data)
             if frame.get("seq") != seq or frame.get("opcode") != opcode:
+                log.debug(
+                    "MAX auth unrelated frame expected_opcode=%s expected_seq=%s "
+                    "received_opcode=%s received_seq=%s",
+                    opcode, seq, frame.get("opcode"), frame.get("seq"),
+                )
                 continue
 
             response = frame.get("payload") or {}
+            error = response.get("error")
+            error_code = error.get("code") if isinstance(error, dict) else None
+            if not isinstance(error_code, int):
+                error_code = None
+            log.debug(
+                "MAX auth response opcode=%s seq=%s cmd=%s has_error=%s error_code=%s "
+                "has_password_challenge=%s has_login_token=%s has_profile=%s",
+                opcode, seq, frame.get("cmd"), bool(error), error_code,
+                bool(response.get("passwordChallenge")),
+                bool((response.get("tokenAttrs") or {}).get("LOGIN")),
+                bool(response.get("profile")),
+            )
             if frame.get("cmd") != 1 or response.get("error"):
                 error = response.get("error") or response.get("localizedMessage") or "request rejected"
                 raise MaxLoginError(f"MAX authorization request failed: {error}")
@@ -155,12 +178,15 @@ class MaxQrAuthorizationFlow:
             if not (status.get("status") or {}).get("loginAvailable"):
                 continue
 
+            log.debug("MAX QR login available; requesting credentials")
+
             result = await self.client.request(OP_QR_LOGIN, {"trackId": self.track_id})
             if result.get("passwordChallenge"):
                 track_id = (result["passwordChallenge"] or {}).get("trackId")
                 if not track_id:
                     raise MaxLoginError("MAX requested a password without a track ID")
                 self.password_track_id = str(track_id)
+                log.debug("MAX QR login requires password track_id_present=true")
                 raise MaxPasswordRequired("MAX requested a two-factor password")
             credentials = extract_credentials(result)
             if credentials is None:
@@ -171,6 +197,7 @@ class MaxQrAuthorizationFlow:
         raise MaxLoginError("MAX QR code expired. Send login again for a new code.")
 
     async def submit_password(self, password: str) -> tuple[str, str, str]:
+        log.debug("MAX password submission started track_id_present=%s", bool(self.password_track_id))
         if not self.password_track_id:
             raise MaxLoginError("MAX is not waiting for a two-factor password")
         if not password:
@@ -180,6 +207,7 @@ class MaxQrAuthorizationFlow:
             {"trackId": self.password_track_id, "password": password},
         )
         credentials = extract_credentials(result)
+        log.debug("MAX password response credentials_present=%s", credentials is not None)
         if credentials is None:
             raise MaxLoginError("MAX did not return login credentials after password verification")
         token, account_id = credentials

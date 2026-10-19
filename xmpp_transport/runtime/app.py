@@ -17,6 +17,7 @@ from xmpp_transport.ports.backend import BackendPlugin
 from .composition import SingleBackendRuntime, compose_single_backend
 from .config import RuntimeConfig, load_config
 from .daemon import DaemonError, daemon_status, daemonize, remove_pid_file, stop_daemon
+from .logging_config import configure_backend_logging
 
 BACKEND_ENTRY_POINT_GROUP = "xabber_transport.backends"
 
@@ -209,6 +210,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 umask=parse_umask(args.daemon_umask),
             )
             daemon_started = True
+        configure_backend_logging(backend.name, backend.options.get("log_file", ""))
         asyncio.run(serve_runtime(runtime))
         return 0
     except KeyboardInterrupt:
