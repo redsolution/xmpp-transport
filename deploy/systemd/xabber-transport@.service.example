@@ -14,8 +14,8 @@ RuntimeDirectory=xabber-transport-%i
 RuntimeDirectoryMode=0755
 PIDFile=/run/xabber-transport-%i/xabber_transport_%i.pid
 
-ExecStart=/path/xmpp-transport/venv/bin/xabber-transport --config /path/transports.ini --backend %i --daemon --pid-file /run/xabber-transport-%i/xabber_transport_%i.pid --daemon-workdir /path/xmpp-transport
-ExecStop=/path/xmpp-transport/venv/bin/xabber-transport --config /path/transports.ini --backend %i --stop --pid-file /run/xabber-transport-%i/xabber_transport_%i.pid
+ExecStart=/usr/bin/python3 -m xmpp_transport.runtime.app --config /path/transports.ini --backend %i --daemon --pid-file /run/xabber-transport-%i/xabber_transport_%i.pid --daemon-workdir /path/xmpp-transport
+ExecStop=/usr/bin/python3 -m xmpp_transport.runtime.app --config /path/transports.ini --backend %i --stop --pid-file /run/xabber-transport-%i/xabber_transport_%i.pid
 ExecStartPost=/bin/sleep 2
 
 Restart=on-failure
