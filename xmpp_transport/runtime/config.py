@@ -103,7 +103,8 @@ class RuntimeConfig:
 
 
 def load_config(path: Path) -> RuntimeConfig:
-    parser = ConfigParser()
+    # Secrets and percent-encoded DSNs are literal values, not INI templates.
+    parser = ConfigParser(interpolation=None)
     if not parser.read(str(path)):
         raise ValueError("configuration file not found: {}".format(path))
 

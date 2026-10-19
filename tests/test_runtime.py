@@ -22,6 +22,27 @@ class RegistryTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_percent_encoded_dsn_and_secret_are_literal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "transport.ini"
+            path.write_text(
+                "[backend:max]\ncomponent_jid=max.example.com\n"
+                "component_password=secret%with-percent\n"
+                "[database]\n"
+                "dsn=postgresql://transport:p%40ss%25word@127.0.0.1:5432/maxtransport\n"
+                "[security]\niq_auth_secret=literal%value\n",
+                encoding="utf-8",
+            )
+            config = load_config(path)
+
+        assert config.database is not None
+        self.assertEqual(
+            "postgresql://transport:p%40ss%25word@127.0.0.1:5432/maxtransport",
+            config.database.dsn,
+        )
+        self.assertEqual("secret%with-percent", config.backends[0].component_password)
+        self.assertEqual("literal%value", config.iq_auth_secret)
+
     def test_reads_multiple_backend_sections(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "transport.ini"
