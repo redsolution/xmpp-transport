@@ -14,16 +14,26 @@ python3 -m unittest discover -s tests
 python3 -m xmpp_transport.runtime.app --help
 ```
 
-Create a complete MAX and Telegram configuration with newly generated secrets:
+Create a configuration for the selected backend with newly generated secrets:
 
 ```bash
 python3 -m xmpp_transport.runtime.create_config \
+  --backend max --output max.ini
+
+python3 -m xmpp_transport.runtime.create_config \
+  --backend telegram --output telegram.ini \
   --telegram-api-id 123456 \
   --telegram-api-hash replace-with-telegram-api-hash
 ```
 
 Both Telegram API arguments are optional. When omitted, the command leaves
 `api_id` and `api_hash` empty for manual configuration later.
+
+Each file contains only the selected backend plus shared database and security
+settings. Omit `--backend` to generate both backends in one file as before.
+When deploying separate files against the same database, keep the same
+`credential_key` in both files and preserve it across configuration updates.
+Set `iq_auth_secret` to match the server roster helper configuration.
 
 The command creates `transports.ini` with mode `0600`. It refuses to overwrite
 an existing file unless `--force` is passed. Use `--database-dsn`,

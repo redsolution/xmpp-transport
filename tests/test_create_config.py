@@ -8,6 +8,39 @@ from xmpp_transport.runtime.create_config import build_config, create_config, pa
 
 
 class CreateConfigTests(unittest.TestCase):
+    def test_generates_only_selected_backend_with_shared_settings(self) -> None:
+        for backend, secret_count in (("max", 2), ("telegram", 3)):
+            with self.subTest(backend=backend), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "transport.ini"
+                args = parse_args(("--backend", backend, "--output", str(path)))
+                calls = []
+
+                def secret_factory(size):  # type: ignore[no-untyped-def]
+                    calls.append(size)
+                    return "generated-secret"
+
+                path.write_text(build_config(args, secret_factory), encoding="utf-8")
+                config = load_config(path)
+                self.assertEqual([backend], [item.name for item in config.backends])
+                self.assertIsNotNone(config.database)
+                self.assertEqual("generated-secret", config.iq_auth_secret)
+                self.assertEqual(secret_count, len(calls))
+                self.assertEqual(
+                    backend == "telegram", "api_id" in config.backends[0].options
+                )
+
+    def test_invalid_config_does_not_truncate_existing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "transport.ini"
+            path.write_text("existing settings", encoding="utf-8")
+            args = parse_args((
+                "--backend", "telegram", "--telegram-api-id", "-1",
+                "--output", str(path), "--force",
+            ))
+            with self.assertRaises(ValueError):
+                create_config(args)
+            self.assertEqual("existing settings", path.read_text(encoding="utf-8"))
+
     def _args(self, output: Path):  # type: ignore[no-untyped-def]
         return parse_args(
             (

@@ -1,4 +1,4 @@
-"""Create a complete two-backend INI configuration with fresh secrets."""
+"""Create selected backend INI sections and shared settings with fresh secrets."""
 
 import argparse
 import os
@@ -13,6 +13,10 @@ from cryptography.fernet import Fernet
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="xabber-transport-create-config")
+    parser.add_argument(
+        "--backend", choices=("max", "telegram"),
+        help="generate only this backend (default: both MAX and Telegram)",
+    )
     parser.add_argument("--output", type=Path, default=Path("transports.ini"))
     parser.add_argument("--server-domain", default="example.com")
     parser.add_argument("--server-ip", default="127.0.0.1")
@@ -35,24 +39,24 @@ def build_config(
     secret_factory: Callable[[int], str] = secrets.token_urlsafe,
     credential_key: Optional[str] = None,
 ) -> str:
-    if args.telegram_api_id is not None and args.telegram_api_id <= 0:
-        raise ValueError("telegram-api-id must be positive")
     values = {
         "server_domain": _ini_value(args.server_domain, "server-domain"),
         "server_ip": _ini_value(args.server_ip, "server-ip"),
         "database_dsn": _ini_value(args.database_dsn, "database-dsn"),
-        "telegram_api_hash": _optional_ini_value(
-            args.telegram_api_hash, "telegram-api-hash"
-        ),
-        "max_component_password": secret_factory(48),
-        "telegram_component_password": secret_factory(48),
-        "media_url_secret": secret_factory(48),
-        "iq_auth_secret": secret_factory(48),
         "credential_key": credential_key or Fernet.generate_key().decode("ascii"),
-        "telegram_api_id": (
-            str(args.telegram_api_id) if args.telegram_api_id is not None else ""
-        ),
     }
+    sections = []
+    if args.backend in (None, "max"):
+        sections.append(_max_config(values, secret_factory))
+    if args.backend in (None, "telegram"):
+        sections.append(_telegram_config(args, values, secret_factory))
+    values["iq_auth_secret"] = secret_factory(48)
+    sections.append(_shared_config(values))
+    return "\n".join(sections)
+
+
+def _max_config(values: dict[str, str], secret_factory: Callable[[int], str]) -> str:
+    values = dict(values, max_component_password=secret_factory(48))
     return """[backend:max]
 component_jid = max.{server_domain}
 server_ip = {server_ip}
@@ -70,8 +74,22 @@ qr_cleanup_interval_seconds = 3600
 contacts_page_size = 20
 roster_group = MAX
 test_self_messages = false
+""".format(**values)
 
-[backend:telegram]
+
+def _telegram_config(
+    args: argparse.Namespace, values: dict[str, str], secret_factory: Callable[[int], str]
+) -> str:
+    if args.telegram_api_id is not None and args.telegram_api_id <= 0:
+        raise ValueError("telegram-api-id must be positive")
+    values = dict(
+        values,
+        telegram_component_password=secret_factory(48),
+        media_url_secret=secret_factory(48),
+        telegram_api_hash=_optional_ini_value(args.telegram_api_hash, "telegram-api-hash"),
+        telegram_api_id=str(args.telegram_api_id) if args.telegram_api_id is not None else "",
+    )
+    return """[backend:telegram]
 component_jid = telegram.{server_domain}
 server_ip = {server_ip}
 server_port = 5238
@@ -98,8 +116,11 @@ avatar_cleanup_interval_seconds = 86400
 contacts_page_size = 20
 roster_group = Telegram
 test_self_messages = false
+""".format(**values)
 
-[database]
+
+def _shared_config(values: dict[str, str]) -> str:
+    return """[database]
 dsn = {database_dsn}
 schema = public
 min_pool_size = 1
@@ -118,12 +139,13 @@ def create_config(args: argparse.Namespace) -> Path:
         raise FileExistsError(
             f"configuration already exists: {output} (use --force to replace it)"
         )
+    content = build_config(args)
     output.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT
     flags |= os.O_TRUNC if args.force else os.O_EXCL
     descriptor = os.open(str(output), flags, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-        stream.write(build_config(args))
+        stream.write(content)
     os.chmod(str(output), 0o600)
     return output
 
