@@ -75,7 +75,6 @@ class CompositionTests(unittest.TestCase):
             ),
             database=DatabaseConfig("postgresql://user:private@db/transport"),
             credential_key_env="CREDENTIAL_KEY",
-            iq_auth_secret="shared-roster-iq-secret-at-least-32-bytes",
         )
         runtime = compose_single_backend(
             config,
@@ -119,7 +118,6 @@ class CompositionTests(unittest.TestCase):
             database=DatabaseConfig("postgresql://user:private@db/transport"),
             http=HttpConfig("127.0.0.1", 8080),
             credential_key_env="CREDENTIAL_KEY",
-            iq_auth_secret="shared-roster-iq-secret-at-least-32-bytes",
         )
 
         runtime = compose_single_backend(
@@ -149,7 +147,6 @@ class CompositionTests(unittest.TestCase):
             ),
             database=DatabaseConfig("postgresql://user:private@db/transport"),
             credential_key_env="CREDENTIAL_KEY",
-            iq_auth_secret="shared-roster-iq-secret-at-least-32-bytes",
         )
 
         with self.assertRaisesRegex(ValueError, "http_port"):
@@ -162,7 +159,7 @@ class CompositionTests(unittest.TestCase):
                 },
             )
 
-    def test_requires_iq_auth_secret(self) -> None:
+    def test_uses_component_password_for_roster_encryption(self) -> None:
         key = Fernet.generate_key().decode("ascii")
         config = RuntimeConfig(
             backends=(
@@ -176,15 +173,12 @@ class CompositionTests(unittest.TestCase):
             credential_key_env="CREDENTIAL_KEY",
         )
 
-        with self.assertRaisesRegex(ValueError, "iq_auth_secret"):
-            compose_single_backend(
-                config,
-                FakePlugin(),  # type: ignore[arg-type]
-                {
-                    "FAKE_COMPONENT_PASSWORD": "component-secret",
-                    "CREDENTIAL_KEY": key,
-                },
-            )
+        runtime = compose_single_backend(
+            config,
+            FakePlugin(),  # type: ignore[arg-type]
+            {"FAKE_COMPONENT_PASSWORD": "component-secret", "CREDENTIAL_KEY": key},
+        )
+        self.assertEqual("component-secret", runtime._component_password)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,12 @@
 """Roster mutations through the privileged Xabber Server helper module."""
 
+import base64
 import hashlib
-import hmac
+import os
 from typing import Protocol, Sequence
-from uuid import uuid4
 from xml.etree import ElementTree as ET
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from xmpp_transport.domain.identifiers import BindingId
 from xmpp_transport.domain.models import Contact
@@ -32,10 +34,10 @@ class XmppServerRoster:
         server_domain: str,
         namespace: str,
         groups: Sequence[str],
-        iq_auth_secret: str,
+        component_password: str,
     ) -> None:
-        if len(iq_auth_secret.encode("utf-8")) < 32:
-            raise ValueError("iq_auth_secret must contain at least 32 bytes")
+        if not component_password:
+            raise ValueError("component_password must not be empty")
         self._wire = wire
         self._bindings = bindings
         self._addresses = addresses
@@ -43,7 +45,9 @@ class XmppServerRoster:
         self._server_domain = server_domain
         self._namespace = namespace
         self._groups = tuple(groups)
-        self._iq_auth_secret = iq_auth_secret.encode("utf-8")
+        self._encryption_key = hashlib.sha256(
+            b"xabber-roster-iq-v1\x00" + component_password.encode("utf-8")
+        ).digest()
 
     async def add_contact(self, binding_id: BindingId, contact: Contact) -> None:
         await self._mutate("add-roster-contact", binding_id, contact)
@@ -60,37 +64,34 @@ class XmppServerRoster:
         owner_jid = await self._bindings.xmpp_account_for_binding(binding_id)
         if owner_jid is None:
             raise LookupError("active XMPP account not found for roster synchronization")
-        iq_id = uuid4().hex
-        signature = hmac.new(
-            self._iq_auth_secret,
-            iq_id.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
         iq = ET.Element(
             "iq",
             {
-                "id": iq_id,
                 "type": "set",
                 "from": self._component_domain,
                 "to": self._server_domain,
             },
         )
-        query = ET.SubElement(
-            iq,
-            "{{{}}}query".format(self._namespace),
-            {"op": operation, "auth-signature": signature},
-        )
+        query = ET.SubElement(iq, "{{{}}}query".format(self._namespace))
+        request = ET.Element("request", {"op": operation})
         fields = {
             "owner_jid": owner_jid,
             "contact_jid": self._addresses.contact_jid(contact.id),
             "name": contact.display_name,
         }
         for name, value in fields.items():
-            field = ET.SubElement(query, "field", {"name": name})
+            field = ET.SubElement(request, "field", {"name": name})
             field.text = value
         if operation != "remove-roster-contact":
             for group_name in self._groups:
-                ET.SubElement(query, "group").text = group_name
+                ET.SubElement(request, "group").text = group_name
+        nonce = os.urandom(12)
+        ciphertext = AESGCM(self._encryption_key).encrypt(
+            nonce, ET.tostring(request, encoding="utf-8"), None
+        )
+        ET.SubElement(query, "payload", {"encoding": "aes-256-gcm"}).text = (
+            base64.b64encode(nonce + ciphertext).decode("ascii")
+        )
         response = await self._wire.request(iq)
         result = response.find("{{{}}}query".format(self._namespace))
         if result is not None and result.attrib.get("status", "ok") not in {

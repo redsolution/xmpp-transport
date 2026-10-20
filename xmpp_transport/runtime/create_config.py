@@ -50,7 +50,6 @@ def build_config(
         sections.append(_max_config(values, secret_factory))
     if args.backend in (None, "telegram"):
         sections.append(_telegram_config(args, values, secret_factory))
-    values["iq_auth_secret"] = secret_factory(48)
     sections.append(_shared_config(values))
     return "\n".join(sections)
 
@@ -129,7 +128,6 @@ command_timeout = 30
 
 [security]
 credential_key = {credential_key}
-iq_auth_secret = {iq_auth_secret}
 """.format(**values)
 
 

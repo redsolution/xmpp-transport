@@ -82,14 +82,7 @@ class XmppGroupManager:
         # The group creator is already a member.  The original transports do
         # not update info or invite the component after create/conflict: both
         # requests can be rejected when an existing group is restored.
-        await self._ensure_member(
-            owner_jid,
-            group_jid,
-            owner_jid,
-            owner_jid.split("@", 1)[0],
-            auto_join=False,
-            send_invite=True,
-        )
+        await self._ensure_owner_invitation(owner_jid, group_jid, conversation)
         if conversation.avatar is not None:
             try:
                 await self._update_avatar(group_jid, conversation)
@@ -128,6 +121,48 @@ class XmppGroupManager:
             )
         self._ensured_groups[(owner_jid, group_jid)] = signature
 
+    async def _ensure_owner_invitation(
+        self, owner_jid: str, group_jid: str, conversation: Conversation
+    ) -> None:
+        key = (owner_jid, group_jid, owner_jid)
+        if key in self._ensured_members:
+            return
+        invite = ET.Element("{{{}}}invite".format(GROUPS_NS))
+        ET.SubElement(invite, "jid").text = owner_jid
+        ET.SubElement(invite, "send").text = "false"
+        ET.SubElement(invite, "reason").text = "{} group member".format(
+            self._provider_label
+        )
+        try:
+            await self._request(group_jid, invite)
+        except Exception as exc:
+            # An earlier server-side invitation may have created the pending
+            # invitation before its notification failed.
+            if not self._is_conflict(exc):
+                raise
+        message = ET.Element(
+            "message",
+            {"type": "chat", "from": self._control_jid, "to": owner_jid},
+        )
+        direct_invite = ET.SubElement(
+            message, "{{{}}}invite".format(GROUPS_NS), {"jid": group_jid}
+        )
+        ET.SubElement(direct_invite, "reason").text = "{} group member".format(
+            self._provider_label
+        )
+        group = ET.SubElement(
+            message,
+            "{{{}}}group".format(GROUPS_NS),
+            {"jid": group_jid, "privacy": "public"},
+        )
+        info = ET.SubElement(group, "info")
+        ET.SubElement(info, "name").text = conversation.title
+        ET.SubElement(message, "body").text = (
+            "To join the group chat, add {} to your contact list.".format(group_jid)
+        )
+        await self._wire.send(message)
+        self._ensured_members.add(key)
+
     async def _update_avatar(
         self, group_jid: str, conversation: Conversation
     ) -> None:
@@ -164,14 +199,13 @@ class XmppGroupManager:
         nickname: str,
         *,
         auto_join: bool,
-        send_invite: bool = False,
     ) -> None:
         key = (owner_jid, group_jid, member_jid)
         if key in self._ensured_members:
             return
         invite = ET.Element("{{{}}}invite".format(GROUPS_NS))
         ET.SubElement(invite, "jid").text = member_jid
-        ET.SubElement(invite, "send").text = "true" if send_invite else "false"
+        ET.SubElement(invite, "send").text = "false"
         ET.SubElement(invite, "reason").text = "{} group member".format(
             self._provider_label
         )

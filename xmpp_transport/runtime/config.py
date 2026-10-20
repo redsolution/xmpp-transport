@@ -76,7 +76,6 @@ class RuntimeConfig:
     credential_key_env: str = "XABBER_TRANSPORT_CREDENTIAL_KEY"
     environment_file: Optional[Path] = None
     credential_key_value: Optional[str] = field(default=None, repr=False)
-    iq_auth_secret: str = field(default="", repr=False)
 
     def credential_key(self, environment: Optional[Mapping[str, str]] = None) -> bytes:
         source = os.environ if environment is None else environment
@@ -147,9 +146,6 @@ def load_config(path: Path) -> RuntimeConfig:
         credential_key_env=key_environment,
         environment_file=_environment_file(parser, path),
         credential_key_value=key_value,
-        iq_auth_secret=parser.get(
-            "security", "iq_auth_secret", fallback=""
-        ).strip(),
     )
 
 

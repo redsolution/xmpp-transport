@@ -49,6 +49,20 @@ class AvatarRejectingWire(FakeWire):
         return ET.Element("iq", {"type": "result"})
 
 
+class ExistingInvitationWire(FakeWire):
+    async def request(self, element: ET.Element, timeout: float = 10.0) -> ET.Element:
+        self.requests.append(element)
+        if element.find("{{{}}}invite".format(GROUPS_NS)) is not None:
+            response = ET.fromstring(
+                "<iq type='error'><error><conflict "
+                "xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></error></iq>"
+            )
+            error = RuntimeError("already invited")
+            error.iq = type("Iq", (), {"xml": response})()  # type: ignore[attr-defined]
+            raise error
+        return ET.Element("iq", {"type": "result"})
+
+
 class XmppGroupManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_creates_and_updates_transport_owned_group(self) -> None:
         wire = FakeWire()
@@ -89,17 +103,29 @@ class XmppGroupManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             "user@example.com", owner_invite.find(invite_tag + "/jid").text
         )
-        self.assertEqual("true", owner_invite.find(invite_tag + "/send").text)
+        self.assertEqual("false", owner_invite.find(invite_tag + "/send").text)
         self.assertEqual(
             "chat-99@max.example.com",
             member_invite.find(invite_tag + "/jid").text,
         )
-        self.assertEqual(2, len(wire.sent))
+        self.assertEqual(3, len(wire.sent))
+        owner_message = wire.sent[0]
+        self.assertEqual("message", owner_message.tag)
+        self.assertEqual("user@example.com", owner_message.attrib["to"])
+        self.assertEqual("bot@max.example.com", owner_message.attrib["from"])
+        self.assertEqual(
+            localpart + "@example.com",
+            owner_message.find("{{{}}}invite".format(GROUPS_NS)).attrib["jid"],
+        )
+        self.assertEqual(
+            "MAX Group",
+            owner_message.find("{{{}}}group/info/name".format(GROUPS_NS)).text,
+        )
         self.assertEqual(
             ["subscribe", "subscribed"],
-            [presence.attrib["type"] for presence in wire.sent],
+            [presence.attrib["type"] for presence in wire.sent[1:]],
         )
-        self.assertEqual("chat-99@max.example.com", wire.sent[0].attrib["from"])
+        self.assertEqual("chat-99@max.example.com", wire.sent[1].attrib["from"])
 
         await manager.ensure_group(
             BindingId("binding-1"),
@@ -112,7 +138,27 @@ class XmppGroupManagerTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.assertEqual(3, len(wire.requests))
-        self.assertEqual(2, len(wire.sent))
+        self.assertEqual(3, len(wire.sent))
+
+    async def test_existing_invitation_still_sends_owner_message(self) -> None:
+        wire = ExistingInvitationWire()
+        manager = XmppGroupManager(
+            wire,  # type: ignore[arg-type]
+            FakeBindings(),  # type: ignore[arg-type]
+            "max.example.com",
+            "example.com",
+            "bot",
+            "maxg",
+            "MAX",
+        )
+        await manager.ensure_group(
+            BindingId("binding-1"),
+            Conversation(RemoteObjectId("-888"), ConversationKind.GROUP, "MAX Group"),
+        )
+        self.assertEqual(1, len(wire.sent))
+        self.assertIsNotNone(
+            wire.sent[0].find("{{{}}}invite".format(GROUPS_NS))
+        )
 
 
     async def test_updates_group_avatar_with_external_metadata(self) -> None:

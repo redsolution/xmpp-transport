@@ -1,6 +1,9 @@
+import base64
+import hashlib
 import unittest
-from unittest.mock import patch
 from xml.etree import ElementTree as ET
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from xmpp_transport.adapters.xmpp.addressing import ContactAddressCodec
 from xmpp_transport.adapters.xmpp.roster import XmppServerRoster
@@ -46,48 +49,62 @@ class XmppServerRosterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.contact = Contact(RemoteObjectId("42"), "Alice")
 
+    def decrypted_request(self, iq: ET.Element) -> ET.Element:
+        query = iq.find("{{{}}}query".format(NAMESPACE))
+        assert query is not None
+        payload = query.find("payload")
+        assert payload is not None and payload.text is not None
+        self.assertEqual("aes-256-gcm", payload.attrib["encoding"])
+        packed = base64.b64decode(payload.text)
+        key = hashlib.sha256(
+            b"xabber-roster-iq-v1\x00shared-roster-iq-secret-at-least-32-bytes"
+        ).digest()
+        return ET.fromstring(AESGCM(key).decrypt(packed[:12], packed[12:], None))
+
     async def test_add_contact_matches_server_module_contract(self) -> None:
         await self.roster.add_contact(BindingId("binding-1"), self.contact)
 
         iq = self.wire.requests[0]
-        query = iq.find("{{{}}}query".format(NAMESPACE))
-        self.assertIsNotNone(query)
-        assert query is not None
+        query = self.decrypted_request(iq)
         fields = {
             child.attrib["name"]: child.text
             for child in query
             if child.tag.rsplit("}", 1)[-1] == "field"
         }
         self.assertEqual("set", iq.attrib["type"])
-        self.assertTrue(iq.attrib["id"])
+        self.assertNotIn("id", iq.attrib)
         self.assertEqual("max.example.com", iq.attrib["from"])
         self.assertEqual("example.com", iq.attrib["to"])
         self.assertEqual("add-roster-contact", query.attrib["op"])
-        self.assertEqual(64, len(query.attrib["auth-signature"]))
         self.assertEqual("user@example.com", fields["owner_jid"])
         self.assertEqual("chat-42@max.example.com", fields["contact_jid"])
         self.assertEqual("Alice", fields["name"])
         self.assertEqual("MAX", query.findtext("group"))
 
-    async def test_signature_is_hmac_of_iq_id(self) -> None:
-        fixed_id = "0123456789abcdef0123456789abcdef"
-        with patch(
-            "xmpp_transport.adapters.xmpp.roster.uuid4",
-            return_value=type("Uuid", (), {"hex": fixed_id})(),
-        ):
-            await self.roster.add_contact(BindingId("binding-1"), self.contact)
-
-        iq = self.wire.requests[0]
-        query = iq.find("{{{}}}query".format(NAMESPACE))
-        assert query is not None
-        self.assertEqual(fixed_id, iq.attrib["id"])
+    async def test_encrypted_payload_changes_for_each_request(self) -> None:
+        await self.roster.add_contact(BindingId("binding-1"), self.contact)
+        await self.roster.add_contact(BindingId("binding-1"), self.contact)
+        first = self.wire.requests[0].find(".//payload")
+        second = self.wire.requests[1].find(".//payload")
+        assert first is not None and second is not None
+        self.assertNotEqual(first.text, second.text)
         self.assertEqual(
-            "fa2efc28f604d5f2e3eaf1697e473b224454bd51b49eb0df022630a4ce7b5020",
-            query.attrib["auth-signature"],
+            ET.tostring(self.decrypted_request(self.wire.requests[0])),
+            ET.tostring(self.decrypted_request(self.wire.requests[1])),
         )
 
-    def test_rejects_short_iq_auth_secret(self) -> None:
-        with self.assertRaisesRegex(ValueError, "iq_auth_secret"):
+    async def test_modified_payload_cannot_be_decrypted(self) -> None:
+        await self.roster.add_contact(BindingId("binding-1"), self.contact)
+        payload = self.wire.requests[0].find(".//payload")
+        assert payload is not None and payload.text is not None
+        packed = bytearray(base64.b64decode(payload.text))
+        packed[-1] ^= 1
+        payload.text = base64.b64encode(packed).decode("ascii")
+        with self.assertRaises(Exception):
+            self.decrypted_request(self.wire.requests[0])
+
+    def test_rejects_empty_component_password(self) -> None:
+        with self.assertRaisesRegex(ValueError, "component_password"):
             XmppServerRoster(
                 self.wire,
                 Bindings(),  # type: ignore[arg-type]
@@ -96,14 +113,13 @@ class XmppServerRosterTests(unittest.IsolatedAsyncioTestCase):
                 "example.com",
                 NAMESPACE,
                 ("Telegram",),
-                "short",
+                "",
             )
 
     async def test_remove_contact_omits_group(self) -> None:
         await self.roster.remove_contact(BindingId("binding-1"), self.contact)
 
-        query = self.wire.requests[0].find("{{{}}}query".format(NAMESPACE))
-        assert query is not None
+        query = self.decrypted_request(self.wire.requests[0])
         self.assertEqual("remove-roster-contact", query.attrib["op"])
         self.assertIsNone(query.find("group"))
 

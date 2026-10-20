@@ -9,7 +9,7 @@ from xmpp_transport.runtime.create_config import build_config, create_config, pa
 
 class CreateConfigTests(unittest.TestCase):
     def test_generates_only_selected_backend_with_shared_settings(self) -> None:
-        for backend, secret_count in (("max", 2), ("telegram", 3)):
+        for backend, secret_count in (("max", 1), ("telegram", 2)):
             with self.subTest(backend=backend), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "transport.ini"
                 args = parse_args(("--backend", backend, "--output", str(path)))
@@ -23,7 +23,7 @@ class CreateConfigTests(unittest.TestCase):
                 config = load_config(path)
                 self.assertEqual([backend], [item.name for item in config.backends])
                 self.assertIsNotNone(config.database)
-                self.assertEqual("generated-secret", config.iq_auth_secret)
+                self.assertNotIn("iq_auth_secret", path.read_text(encoding="utf-8"))
                 self.assertEqual(secret_count, len(calls))
                 self.assertEqual(
                     backend == "telegram", "api_id" in config.backends[0].options
@@ -57,7 +57,7 @@ class CreateConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "transports.ini"
             args = self._args(path)
-            sequence = iter(("max-secret", "telegram-secret", "media-secret", "iq-secret"))
+            sequence = iter(("max-secret", "telegram-secret", "media-secret"))
             content = build_config(
                 args,
                 secret_factory=lambda _size: next(sequence),
@@ -80,7 +80,7 @@ class CreateConfigTests(unittest.TestCase):
             backends["telegram"].options["qr_storage_dir"],
         )
         self.assertEqual("media-secret", backends["telegram"].options["media_url_secret"])
-        self.assertEqual("iq-secret", config.iq_auth_secret)
+        self.assertNotIn("iq_auth_secret", content)
 
     def test_creates_private_file_and_refuses_implicit_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

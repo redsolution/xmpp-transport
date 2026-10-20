@@ -35,7 +35,8 @@ For manual setup, use `max.example.ini` or `telegram.example.ini` as the
 template for the corresponding private config file.
 When deploying separate files against the same database, keep the same
 `credential_key` in both files and preserve it across configuration updates.
-Set `iq_auth_secret` to match the server roster helper configuration.
+Roster IQ requests use AES-GCM with the component password already configured
+on both the transport and the server. No separate roster IQ secret is needed.
 
 The command creates `transports.ini` with mode `0600`. It refuses to overwrite
 an existing file unless `--force` is passed. Use `--database-dsn`,

@@ -23,9 +23,13 @@ class BackendLoggingTests(unittest.TestCase):
                 logging.getLogger("xmpp_transport.adapters.backends.max.client").debug(
                     "private message body should be filtered"
                 )
+                logging.getLogger("xmpp_transport.adapters.events.in_memory").error(
+                    "Backend event dispatch failed event_type=contact.changed exception_type=IqError"
+                )
                 logger.handlers[0].flush()
                 self.assertEqual(0o600, os.stat(path).st_mode & 0o777)
                 self.assertIn("password flow stage=submitted", path.read_text())
+                self.assertIn("event_type=contact.changed exception_type=IqError", path.read_text())
                 self.assertNotIn("private message body", path.read_text())
         finally:
             for handler in list(logger.handlers):
