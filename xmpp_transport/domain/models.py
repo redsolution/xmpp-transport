@@ -80,6 +80,10 @@ class Media:
 @dataclass(frozen=True)
 class ReplyReference:
     message_id: RemoteObjectId
+    body: Optional[str] = None
+    sender_id: Optional[RemoteObjectId] = None
+    is_self: bool = False
+    media: Sequence[Media] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -92,6 +96,7 @@ class ForwardReference:
     media: Sequence[Media] = field(default_factory=tuple)
     source_recipient: Optional[str] = None
     is_self: bool = False
+    source_message_ids: Sequence[RemoteObjectId] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)

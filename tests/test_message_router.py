@@ -7,7 +7,12 @@ from xmpp_transport.application.message_router import MessageRouter
 from xmpp_transport.domain.errors import FeatureUnavailable
 from xmpp_transport.domain.events import EventEnvelope, MessageReceived
 from xmpp_transport.domain.identifiers import BackendId, BindingId, EventId, RemoteObjectId
-from xmpp_transport.domain.models import IncomingMessage, MessageButton, OutgoingMessage
+from xmpp_transport.domain.models import (
+    ForwardReference,
+    IncomingMessage,
+    MessageButton,
+    OutgoingMessage,
+)
 from xmpp_transport.ports.backend import ButtonActions, MessageSender, SendResult
 
 
@@ -56,9 +61,11 @@ class FakeMappings:
 class FakeSender:
     def __init__(self) -> None:
         self.calls = 0
+        self.messages = []
 
     async def send_message(self, message: OutgoingMessage) -> SendResult:
         self.calls += 1
+        self.messages.append(message)
         await asyncio.sleep(0)
         return SendResult(RemoteObjectId("remote-{}".format(message.client_message_id)))
 
@@ -140,6 +147,54 @@ class MessageRouterTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(RemoteObjectId("remote-1"), result.remote_message_id)
+
+    async def test_own_forward_resolves_xabber_id_to_provider_message_id(self) -> None:
+        sender = FakeSender()
+        self.features.values[(self.binding_id, MessageSender)] = sender
+        self.mappings.outgoing[(self.binding_id, "original-client-id")] = RemoteObjectId(
+            "116974846586354125"
+        )
+        await self.router.send(
+            OutgoingMessage(
+                client_message_id="forward-1", binding_id=self.binding_id,
+                conversation_id=RemoteObjectId("22"),
+                forwarded_from=ForwardReference(
+                    source_name="user@example.com",
+                    source_recipient="chat-11@max.example.com",
+                    source_message_id=RemoteObjectId("server-copy-id"),
+                    source_message_ids=(RemoteObjectId("server-copy-id"),
+                                        RemoteObjectId("original-client-id")),
+                    body="Own message", is_self=True,
+                ),
+            )
+        )
+        self.assertEqual(
+            RemoteObjectId("116974846586354125"),
+            sender.messages[0].forwarded_from.source_message_id,
+        )
+        self.assertEqual("Own message", sender.messages[0].forwarded_from.body)
+
+    async def test_own_forward_keeps_provider_id_when_no_xabber_mapping_exists(self) -> None:
+        sender = FakeSender()
+        self.features.values[(self.binding_id, MessageSender)] = sender
+        await self.router.send(
+            OutgoingMessage(
+                client_message_id="forward-2", binding_id=self.binding_id,
+                conversation_id=RemoteObjectId("22"),
+                forwarded_from=ForwardReference(
+                    source_name="user@example.com",
+                    source_recipient="chat-11@max.example.com",
+                    source_message_id=RemoteObjectId("116974846586354125"),
+                    source_message_ids=(RemoteObjectId("client-id"),
+                                        RemoteObjectId("116974846586354125")),
+                    body="Own message from MAX", is_self=True,
+                ),
+            )
+        )
+        self.assertEqual(
+            RemoteObjectId("116974846586354125"),
+            sender.messages[0].forwarded_from.source_message_id,
+        )
 
     async def test_missing_sender_feature_is_reported(self) -> None:
         with self.assertRaises(FeatureUnavailable):

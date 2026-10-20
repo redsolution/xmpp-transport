@@ -2,7 +2,11 @@ import asyncio
 import unittest
 from typing import Dict, List, Optional, Sequence
 
-from xmpp_transport.application.session_supervisor import SessionLifecycleError, SessionSupervisor
+from xmpp_transport.application.session_supervisor import (
+    SessionLifecycleError,
+    SessionSupervisor,
+    _root_exception_type,
+)
 from xmpp_transport.domain.errors import AuthorizationRequired
 from xmpp_transport.domain.identifiers import BackendId, BindingId
 from xmpp_transport.ports.repositories import BindingRecord
@@ -115,7 +119,18 @@ class SessionSupervisorTests(unittest.IsolatedAsyncioTestCase):
             await self.supervisor.start(self.binding_id, self.plugin.backend_id)
         self.assertEqual(1, self.plugin.created[0].closed)
         self.assertEqual("ConnectionError", context.exception.failures[0].exception_type)
+        self.assertIn("binding_id=binding-1", str(context.exception))
+        self.assertIn("exception_type=ConnectionError", str(context.exception))
         self.assertNotIn("provider details", str(context.exception))
+
+    def test_root_exception_type_uses_original_failure_without_its_text(self) -> None:
+        try:
+            raise TimeoutError("private provider response")
+        except TimeoutError as cause:
+            try:
+                raise RuntimeError("wrapped provider response") from cause
+            except RuntimeError as wrapped:
+                self.assertEqual("TimeoutError", _root_exception_type(wrapped))
 
     async def test_restore_starts_all_active_bindings(self) -> None:
         second = BindingId("binding-2")

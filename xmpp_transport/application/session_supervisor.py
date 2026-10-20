@@ -24,7 +24,15 @@ class LifecycleFailure:
 class SessionLifecycleError(TransportError):
     def __init__(self, failures: Tuple[LifecycleFailure, ...]) -> None:
         self.failures = failures
-        super().__init__("{} session lifecycle operation(s) failed".format(len(failures)))
+        details = ", ".join(
+            "binding_id={} operation={} exception_type={}".format(
+                failure.binding_id, failure.operation, failure.exception_type
+            )
+            for failure in failures
+        )
+        super().__init__(
+            "{} session lifecycle operation(s) failed: {}".format(len(failures), details)
+        )
 
 
 @dataclass
@@ -82,7 +90,7 @@ class SessionSupervisor:
             except Exception as exc:
                 await self._close_after_failed_start(session)
                 raise SessionLifecycleError(
-                    (LifecycleFailure(binding_id, "start", type(exc).__name__),)
+                    (LifecycleFailure(binding_id, "start", _root_exception_type(exc)),)
                 ) from exc
 
             async with self._state_lock:
@@ -135,7 +143,7 @@ class SessionSupervisor:
                         LifecycleFailure(
                             record.binding_id,
                             "restore",
-                            type(result).__name__,
+                            _root_exception_type(result),
                         )
                     )
         if failures:
@@ -196,3 +204,13 @@ class SessionSupervisor:
         except Exception:
             # The start failure is primary; both errors must avoid secret-bearing text.
             pass
+
+
+def _root_exception_type(exc: BaseException) -> str:
+    """Expose only the type of the original failure, never its possibly private text."""
+    seen = set()
+    current = exc
+    while current.__cause__ is not None and id(current.__cause__) not in seen:
+        seen.add(id(current))
+        current = current.__cause__
+    return type(current).__name__

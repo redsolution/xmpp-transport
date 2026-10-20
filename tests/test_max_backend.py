@@ -7,10 +7,12 @@ from xmpp_transport.adapters.backends.max import (
     MaxBackendPlugin,
     MaxCredentials,
 )
+from xmpp_transport.adapters.backends.max.client import PersonalMaxBackend
 from xmpp_transport.adapters.backends.max.models import (
     MaxAuthorizationError,
     MaxChat,
     MaxContact,
+    MaxForwardReference,
     MaxIncomingMessage,
     MaxButton,
     MaxMedia,
@@ -133,6 +135,28 @@ class MaxCredentialsTests(unittest.TestCase):
                 MaxCredentials.decode(payload)
 
 
+class MaxWireForwardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_own_forward_uses_native_max_link(self) -> None:
+        client = PersonalMaxBackend(token="token", device_id="device")
+        payloads = []
+
+        async def send_payload(payload, *, chat_id, reply_to_message_id, attaches):
+            payloads.append(payload)
+            return {"payload": {"message": {"id": "sent-1"}}}
+
+        client._send_message_payload_with_attachment_retry = send_payload
+        await client.send_message(
+            text="", chat_id="22",
+            forward_reference=MaxForwardReference("11", "116974846586354125"),
+        )
+
+        self.assertEqual(
+            {"type": "FORWARD", "chatId": 11, "messageId": "116974846586354125"},
+            payloads[0]["message"]["link"],
+        )
+        self.assertEqual("", payloads[0]["message"]["text"])
+
+
 class MaxBackendPluginTests(unittest.TestCase):
     def test_identifies_as_max_and_validates_session_credentials(self) -> None:
         plugin = MaxBackendPlugin()
@@ -214,6 +238,25 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("", self.client.sent[0][0])
         self.assertEqual("11", self.client.forwards[0].source_chat_id)
         self.assertEqual("116974846586354125", self.client.forwards[0].message_id)
+
+    async def test_sends_own_xabber_forward_as_native_max_forward(self) -> None:
+        await self.session.start()
+        await self.session.send_message(
+            OutgoingMessage(
+                client_message_id="forward-own-1",
+                binding_id=BindingId("binding-1"),
+                conversation_id=RemoteObjectId("22"),
+                forwarded_from=ForwardReference(
+                    source_name="user@example.com",
+                    source_recipient="chat-11@max.example.com",
+                    source_message_id=RemoteObjectId("116974846586354125"),
+                    body="Own message", is_self=True,
+                ),
+            )
+        )
+        self.assertEqual("11", self.client.forwards[0].source_chat_id)
+        self.assertEqual("116974846586354125", self.client.forwards[0].message_id)
+        self.assertEqual("", self.client.sent[0][0])
 
     async def test_suppresses_MAX_echo_after_xabber_group_send(self) -> None:
         await self.session.start()
@@ -376,6 +419,52 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(messages))
         self.assertEqual("true", messages[0].message.attributes["is_self"])
         self.assertEqual("true", messages[0].message.attributes["is_group"])
+
+    async def test_group_reply_uses_linked_original_after_restart(self) -> None:
+        plugin = MaxBackendPlugin(lambda credentials: self.client)  # type: ignore[arg-type]
+        plugin.configure({"test_self_messages": "true"})
+        session = plugin.create_session(
+            BindingId("binding-1"),
+            MaxCredentials("token", "device", "account").encode(),
+            self.sink,  # type: ignore[arg-type]
+        )
+        await session.start()
+        await self.client.message_handler(  # type: ignore[misc]
+            MaxIncomingMessage(
+                sender_id="account", text="Ответ", chat_id="group-1",
+                message_id="reply-1", reply_to_message_id="original-1",
+                is_self=True, is_group=True,
+                raw={"message": {"link": {"type": "REPLY", "messageId": "original-1",
+                                           "message": {"id": "original-1", "sender": "account",
+                                                       "text": "Исходное сообщение"}}}},
+            )
+        )
+        received = [
+            event.message for event in self.sink.events if isinstance(event, MessageReceived)
+        ]
+        self.assertEqual("Исходное сообщение", received[0].reply_to.body)
+        self.assertTrue(received[0].reply_to.is_self)
+        self.assertEqual(RemoteObjectId("original-1"), received[0].reply_to.message_id)
+
+    async def test_group_reply_uses_recent_message_when_link_has_no_body(self) -> None:
+        await self.session.start()
+        await self.client.message_handler(  # type: ignore[misc]
+            MaxIncomingMessage(
+                sender_id="member-1", text="Первое", chat_id="group-1",
+                message_id="original-1", is_group=True,
+            )
+        )
+        await self.client.message_handler(  # type: ignore[misc]
+            MaxIncomingMessage(
+                sender_id="member-2", text="Ответ", chat_id="group-1",
+                message_id="reply-1", reply_to_message_id="original-1", is_group=True,
+            )
+        )
+        received = [
+            event.message for event in self.sink.events if isinstance(event, MessageReceived)
+        ]
+        self.assertEqual("Первое", received[1].reply_to.body)
+        self.assertEqual(RemoteObjectId("member-1"), received[1].reply_to.sender_id)
 
     async def test_ignores_group_self_message_when_disabled(self) -> None:
         await self.session.start()

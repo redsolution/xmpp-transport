@@ -170,6 +170,41 @@ https://xabber.example/upload/photo.jpg</body>
             message.forwarded_from.source_message_id,
         )
 
+    def test_parses_own_forward_with_origin_id_before_server_stanza_id(self) -> None:
+        fallback = "> user@example.com:\n> Own message\n"
+        stanza = ET.fromstring(
+            """
+            <message from='user@example.com/phone' to='chat-22@max.example.com'
+                     type='chat' id='forward-1'>
+              <body>{fallback}</body>
+              <reference xmlns='https://xabber.com/protocol/references'
+                         type='mutable' begin='0' end='{end}'>
+                <forwarded xmlns='urn:xmpp:forward:0'>
+                  <message xmlns='jabber:client' from='user@example.com/phone'
+                           to='chat-11@max.example.com' id='server-copy-id'>
+                    <origin-id xmlns='urn:xmpp:sid:0' id='original-client-id'/>
+                    <stanza-id xmlns='urn:xmpp:sid:0' id='archive-id'/>
+                    <body>Own message</body>
+                  </message>
+                </forwarded>
+              </reference>
+            </message>
+            """.format(fallback=fallback, end=_escaped_length(fallback))
+        )
+
+        message = self.codec.parse_outgoing(stanza, self.binding_id, self.conversation_id)
+
+        self.assertTrue(message.forwarded_from.is_self)
+        self.assertEqual("Own message", message.forwarded_from.body)
+        self.assertEqual(
+            RemoteObjectId("server-copy-id"), message.forwarded_from.source_message_id
+        )
+        self.assertEqual(
+            (RemoteObjectId("original-client-id"), RemoteObjectId("server-copy-id"),
+             RemoteObjectId("archive-id")),
+            message.forwarded_from.source_message_ids,
+        )
+
     def test_rejects_empty_body(self) -> None:
         stanza = ET.fromstring("<message type='chat' id='1'><body> </body></message>")
         with self.assertRaises(InvalidCommand):

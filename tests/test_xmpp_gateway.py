@@ -10,12 +10,16 @@ from xmpp_transport.adapters.xmpp.gateway import XmppDirectMessageGateway
 from xmpp_transport.adapters.xmpp.message_codec import XmppMessageCodec
 from xmpp_transport.adapters.xmpp.namespaces import (
     CHAT_MARKERS_NS,
+    CLIENT_NS,
+    FORWARDED_NS,
     GROUPS_NS,
+    REPLY_NS,
     STANZAS_NS,
+    XABBER_REFERENCES_NS,
 )
 from xmpp_transport.domain.errors import FeatureUnavailable
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
-from xmpp_transport.domain.models import IncomingMessage, OutgoingMessage
+from xmpp_transport.domain.models import IncomingMessage, OutgoingMessage, ReplyReference
 from xmpp_transport.ports.backend import SendResult
 from xmpp_transport.ports.repositories import BindingRecord
 
@@ -518,6 +522,49 @@ class XmppGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(
             stanza.find("{urn:xabber:transport:max:1}fake-outgoing")
         )
+
+    async def test_delivers_group_self_reply_with_xabber_reference(self) -> None:
+        from xmpp_transport.adapters.xmpp.gateway import XmppMessageDelivery
+
+        sink = XmppMessageDelivery(
+            self.wire, ContactAddressCodec("max.example.com"), self.bindings,
+            XmppMessageCodec(), server_domain="example.com",
+            control_jid="bot@max.example.com",
+            transport_namespace="urn:xabber:transport:max:1",
+            group_localpart_prefix="maxg", member_fallback_prefix="max",
+        )
+        message = IncomingMessage(
+            id=RemoteObjectId("reply-1"), binding_id=BindingId("binding-1"),
+            conversation_id=RemoteObjectId("888"), sender_id=RemoteObjectId("100"),
+            occurred_at=datetime.now(timezone.utc), text="Ответ",
+            reply_to=ReplyReference(
+                RemoteObjectId("original-1"), body="Исходное & сообщение",
+                sender_id=RemoteObjectId("100"), is_self=True,
+            ),
+            attributes={"is_group": "true", "is_self": "true", "owner_remote_id": "100"},
+        )
+
+        await sink.deliver_message(message)
+
+        stanza = self.wire.sent[0]
+        fallback = "> bot@max.example.com:\n> Исходное & сообщение\n"
+        self.assertEqual("bot@max.example.com", stanza.attrib["from"])
+        self.assertEqual(fallback + "Ответ", stanza.findtext("body"))
+        self.assertEqual("original-1", stanza.find("{%s}reply" % REPLY_NS).attrib["id"])
+        reference = stanza.find("{%s}reference" % XABBER_REFERENCES_NS)
+        self.assertEqual("mutable", reference.attrib["type"])
+        self.assertEqual("0", reference.attrib["begin"])
+        from html import escape
+        self.assertEqual(
+            str(len(escape(fallback, quote=False).encode("utf-16-le")) // 2),
+            reference.attrib["end"],
+        )
+        inner = reference.find("{%s}forwarded/{%s}message" % (FORWARDED_NS, CLIENT_NS))
+        self.assertEqual("original-1", inner.attrib["id"])
+        self.assertEqual("bot@max.example.com", inner.attrib["from"])
+        self.assertEqual(stanza.attrib["to"], inner.attrib["to"])
+        self.assertEqual("Исходное & сообщение", inner.findtext("{%s}body" % CLIENT_NS))
+        self.assertIsNotNone(inner.find("{urn:xabber:transport:max:1}fake-outgoing"))
 
     async def test_delivers_group_message_from_virtual_member_contact(self) -> None:
         from xmpp_transport.adapters.xmpp.gateway import XmppMessageDelivery

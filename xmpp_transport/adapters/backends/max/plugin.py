@@ -4,9 +4,10 @@ The network client is intentionally introduced behind this boundary so MAX
 wire details do not leak into the application and domain packages.
 """
 
-import logging
 import hashlib
 import json
+import logging
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Mapping, Optional, Protocol, Sequence, Tuple, Type
@@ -250,6 +251,7 @@ class MaxBackendSession:
         self._group_chats = {}
         self._pending_group_echoes = set()
         self._sent_group_message_ids = set()
+        self._group_reply_contexts: OrderedDict[tuple[str, str], ReplyReference] = OrderedDict()
         self._started = False
         self._closed = False
 
@@ -353,6 +355,16 @@ class MaxBackendSession:
             self._sent_group_message_ids.add(str(remote_id))
             if len(self._sent_group_message_ids) > 2048:
                 self._sent_group_message_ids.pop()
+            self._remember_group_reply_context(
+                str(message.conversation_id),
+                ReplyReference(
+                    RemoteObjectId(str(remote_id)),
+                    body=message.text,
+                    sender_id=RemoteObjectId(self._credentials.account_id),
+                    is_self=True,
+                    media=message.media,
+                ),
+            )
         return SendResult(RemoteObjectId(str(remote_id)))
 
     async def _receive_message(self, message: MaxIncomingMessage) -> None:
@@ -392,11 +404,23 @@ class MaxBackendSession:
                         ),
                     )
                 )
-        reply = (
-            ReplyReference(RemoteObjectId(message.reply_to_message_id))
-            if message.reply_to_message_id
-            else None
-        )
+        if message.is_group:
+            reply = self._group_reply_reference(message)
+        elif message.reply_to_message_id:
+            reply = ReplyReference(RemoteObjectId(message.reply_to_message_id))
+        else:
+            reply = None
+        if message.is_group:
+            self._remember_group_reply_context(
+                message.chat_id,
+                ReplyReference(
+                    RemoteObjectId(message.message_id),
+                    body=message.text,
+                    sender_id=RemoteObjectId(message.sender_id),
+                    is_self=message.is_self,
+                    media=tuple(self._media(item) for item in message.media),
+                ),
+            )
         forwarded_from = self._forward_reference(message)
         await self._event_sink.publish(
             MessageReceived(
@@ -457,6 +481,33 @@ class MaxBackendSession:
             media=tuple(self._media(item) for item in message.media),
             is_self=str(linked["sender"]) == self._credentials.account_id,
         )
+
+    def _group_reply_reference(self, message: MaxIncomingMessage) -> Optional[ReplyReference]:
+        if not message.reply_to_message_id or not message.chat_id:
+            return None
+        message_id = RemoteObjectId(message.reply_to_message_id)
+        context = self._group_reply_contexts.get((message.chat_id, message.reply_to_message_id))
+        if context is not None:
+            return context
+        raw_message = (message.raw or {}).get("message") or {}
+        link = raw_message.get("link") or {} if isinstance(raw_message, dict) else {}
+        linked = link.get("message") or {} if isinstance(link, dict) else {}
+        if isinstance(linked, dict) and linked.get("sender") is not None:
+            sender_id = str(linked["sender"])
+            return ReplyReference(
+                message_id,
+                body=str(linked.get("text") or "").strip() or None,
+                sender_id=RemoteObjectId(sender_id),
+                is_self=sender_id == self._credentials.account_id,
+            )
+        return ReplyReference(message_id)
+
+    def _remember_group_reply_context(self, chat_id: str, reference: ReplyReference) -> None:
+        key = (chat_id, str(reference.message_id))
+        self._group_reply_contexts[key] = reference
+        self._group_reply_contexts.move_to_end(key)
+        if len(self._group_reply_contexts) > 2048:
+            self._group_reply_contexts.popitem(last=False)
 
     @staticmethod
     def _outer_text(message: MaxIncomingMessage) -> Optional[str]:

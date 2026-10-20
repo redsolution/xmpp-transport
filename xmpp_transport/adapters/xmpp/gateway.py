@@ -320,6 +320,7 @@ class XmppMessageDelivery:
                 if is_self
                 else self._group_member_jid(message)
             )
+            assert sender_jid is not None
             message = self._with_forward_addresses(message, owner_jid, group_jid)
             stanza = self._codec.serialize_group_message(
                 message,
@@ -327,6 +328,15 @@ class XmppMessageDelivery:
                 group_jid,
                 self._transport_namespace,
                 fake_outgoing=is_self,
+                reply_sender_jid=(
+                    self._control_jid
+                    if message.reply_to is not None and message.reply_to.is_self
+                    else self._group_member_jid(
+                        replace(message, sender_id=message.reply_to.sender_id)
+                    )
+                    if message.reply_to is not None and message.reply_to.sender_id is not None
+                    else None
+                ),
             )
             await self._wire.send(stanza)
             return

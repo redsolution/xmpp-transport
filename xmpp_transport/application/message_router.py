@@ -3,6 +3,7 @@
 import asyncio
 import re
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import AsyncIterator, Dict, Hashable, Tuple
 
 from xmpp_transport.domain.errors import FeatureUnavailable
@@ -76,6 +77,7 @@ class MessageRouter:
                         message.binding_id
                     )
                 )
+            message = await self._resolve_forward_source(message)
             result = await sender.send_message(message)
             await self._mappings.save_mapping(
                 message.binding_id,
@@ -83,6 +85,24 @@ class MessageRouter:
                 result.remote_message_id,
             )
             return result
+
+    async def _resolve_forward_source(self, message: OutgoingMessage) -> OutgoingMessage:
+        reference = message.forwarded_from
+        if reference is None or not reference.is_self:
+            return message
+        candidates = reference.source_message_ids or (
+            (reference.source_message_id,) if reference.source_message_id is not None else ()
+        )
+        for candidate in candidates:
+            remote_id = await self._mappings.remote_id_for_client_message(
+                message.binding_id, str(candidate)
+            )
+            if remote_id is not None:
+                return replace(
+                    message,
+                    forwarded_from=replace(reference, source_message_id=remote_id),
+                )
+        return message
 
     async def receive(self, event: MessageReceived) -> bool:
         """Deliver a remote message once; return False for an acknowledged duplicate."""

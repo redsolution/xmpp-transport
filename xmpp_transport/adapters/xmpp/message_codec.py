@@ -103,6 +103,9 @@ class XmppMessageCodec:
         message: IncomingMessage,
         from_jid: str,
         to_jid: str,
+        *,
+        reply_sender_jid: Optional[str] = None,
+        reply_transport_namespace: Optional[str] = None,
     ) -> ET.Element:
         message_id = _bounded_id(str(message.id), self.MAX_ID_LENGTH)
         element = ET.Element(
@@ -117,6 +120,18 @@ class XmppMessageCodec:
         body, forward_range = self._body_with_forward(
             message.text or "", message.forwarded_from, from_jid, to_jid
         )
+        reply_range = None
+        if message.reply_to is not None and message.reply_to.body and reply_sender_jid:
+            quoted_lines = message.reply_to.body.splitlines() or [message.reply_to.body]
+            quoted_text = "\n".join("> {}".format(line) for line in quoted_lines)
+            fallback = "> {}:\n{}\n".format(reply_sender_jid, quoted_text)
+            body = fallback + body
+            reply_range = (0, _escaped_text_length(fallback))
+            if forward_range is not None:
+                forward_range = (
+                    forward_range[0] + reply_range[1],
+                    forward_range[1] + reply_range[1],
+                )
         outer_media = () if message.forwarded_from is not None else message.media
         body, media_ranges = self._body_with_media(body, outer_media)
         body, button_range = self._body_with_buttons(body, message.buttons)
@@ -131,6 +146,11 @@ class XmppMessageCodec:
                 _tag(REPLY_NS, "reply"),
                 {"id": _bounded_id(str(message.reply_to.message_id), self.MAX_ID_LENGTH)},
             )
+            if reply_range is not None and reply_sender_jid is not None:
+                self._append_reply_reference(
+                    element, message.reply_to, reply_range, reply_sender_jid,
+                    to_jid, reply_transport_namespace,
+                )
         occurred_at = message.occurred_at
         if occurred_at.tzinfo is None:
             occurred_at = occurred_at.replace(tzinfo=timezone.utc)
@@ -149,6 +169,40 @@ class XmppMessageCodec:
         if button_range is not None:
             self._append_message_keyboard(element, message.buttons, button_range)
         return element
+
+    def _append_reply_reference(
+        self,
+        element: ET.Element,
+        reference: ReplyReference,
+        body_range: tuple[int, int],
+        sender_jid: str,
+        recipient_jid: str,
+        transport_namespace: Optional[str],
+    ) -> None:
+        outer = ET.SubElement(
+            element,
+            _tag(XABBER_REFERENCES_NS, "reference"),
+            {"type": "mutable", "begin": str(body_range[0]), "end": str(body_range[1])},
+        )
+        forwarded = ET.SubElement(outer, _tag(FORWARDED_NS, "forwarded"))
+        message_id = _bounded_id(str(reference.message_id), self.MAX_ID_LENGTH)
+        inner = ET.SubElement(
+            forwarded,
+            _tag(CLIENT_NS, "message"),
+            {"from": sender_jid, "to": recipient_jid, "type": "chat", "id": message_id},
+        )
+        ET.SubElement(inner, _tag(CHAT_MARKERS_NS, "markable"))
+        ET.SubElement(inner, _tag(SID_NS, "origin-id"), {"id": message_id})
+        if reference.is_self and transport_namespace:
+            ET.SubElement(inner, _tag(transport_namespace, "fake-outgoing"))
+        inner_body, media_ranges = self._body_with_media(  # type: ignore[no-untyped-call]
+            reference.body or "", reference.media
+        )
+        ET.SubElement(inner, _tag(CLIENT_NS, "body")).text = inner_body
+        for media, begin, end in media_ranges:
+            self._append_media_reference(  # type: ignore[no-untyped-call]
+                inner, media, begin, end
+            )
 
     def _body_with_forward(
         self,
@@ -351,9 +405,14 @@ class XmppMessageCodec:
         group_jid: str,
         transport_namespace: Optional[str] = None,
         fake_outgoing: bool = False,
+        reply_sender_jid: Optional[str] = None,
     ) -> ET.Element:
         """Render an incoming provider message through the Xabber group protocol."""
-        element = self.serialize_incoming(message, from_jid, group_jid)
+        element = self.serialize_incoming(
+            message, from_jid, group_jid,
+            reply_sender_jid=reply_sender_jid,
+            reply_transport_namespace=transport_namespace,
+        )
         message_id = element.attrib["id"]
         ET.SubElement(element, _tag(CHAT_MARKERS_NS, "markable"))
         if fake_outgoing:
@@ -537,6 +596,7 @@ class XmppMessageCodec:
         self, element: ET.Element
     ) -> tuple[Optional[ForwardReference], Optional[tuple[int, int]]]:
         outer_to = element.attrib.get("to", "").split("/", 1)[0]
+        outer_from = element.attrib.get("from", "").split("/", 1)[0]
         for reference in element:
             if reference.tag != _tag(XABBER_REFERENCES_NS, "reference"):
                 continue
@@ -562,17 +622,35 @@ class XmppMessageCodec:
                         if line.strip() != item.source_url
                     )
             origin = inner.find(_tag(SID_NS, "origin-id"))
+            stanza_ids = (
+                child.attrib.get("id")
+                for child in inner
+                if child.tag == _tag(SID_NS, "stanza-id")
+            )
+            candidate_ids = tuple(
+                dict.fromkeys(
+                    identifier
+                    for identifier in (
+                        origin.attrib.get("id") if origin is not None else None,
+                        inner.attrib.get("id"),
+                        *stanza_ids,
+                    )
+                    if identifier
+                )
+            )
             message_id = inner.attrib.get("id") or (
-                origin.attrib.get("id") if origin is not None else None
+                candidate_ids[0] if candidate_ids else None
             )
             body_range = _reference_range(reference)
             return (
                 ForwardReference(
                     source_name=inner_from or None,
                     source_recipient=inner_to or None,
-                    source_message_id=(RemoteObjectId(message_id) if message_id else None),
+                    source_message_id=RemoteObjectId(message_id) if message_id else None,
+                    source_message_ids=tuple(RemoteObjectId(item) for item in candidate_ids),
                     body=inner_body.strip() or None,
                     media=media,
+                    is_self=bool(outer_from and inner_from == outer_from),
                 ),
                 body_range,
             )
