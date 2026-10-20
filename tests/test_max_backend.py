@@ -26,7 +26,13 @@ from xmpp_transport.domain.events import (
     SessionStateChanged,
 )
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
-from xmpp_transport.domain.models import ForwardReference, Media, MediaKind, OutgoingMessage
+from xmpp_transport.domain.models import (
+    ForwardReference,
+    Media,
+    MediaKind,
+    OutgoingMessage,
+    ReplyReference,
+)
 from xmpp_transport.ports.backend import ButtonActions, ContactAdder, ContactSource, MessageSender
 
 
@@ -156,6 +162,25 @@ class MaxWireForwardTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("", payloads[0]["message"]["text"])
 
+    async def test_reply_uses_native_max_link_without_quoted_fallback(self) -> None:
+        client = PersonalMaxBackend(token="token", device_id="device")
+        payloads = []
+
+        async def send_payload(payload, *, chat_id, reply_to_message_id, attaches):
+            payloads.append(payload)
+            return {"payload": {"message": {"id": "sent-1"}}}
+
+        client._send_message_payload_with_attachment_retry = send_payload
+        await client.send_message(
+            text="response", chat_id="888", reply_to_message_id="116974846586354125",
+        )
+
+        self.assertEqual(
+            {"type": "REPLY", "messageId": "116974846586354125"},
+            payloads[0]["message"]["link"],
+        )
+        self.assertEqual("response", payloads[0]["message"]["text"])
+
 
 class MaxBackendPluginTests(unittest.TestCase):
     def test_identifies_as_max_and_validates_session_credentials(self) -> None:
@@ -257,6 +282,21 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("11", self.client.forwards[0].source_chat_id)
         self.assertEqual("116974846586354125", self.client.forwards[0].message_id)
         self.assertEqual("", self.client.sent[0][0])
+
+    async def test_sends_group_reply_with_only_response_text(self) -> None:
+        await self.session.start()
+        await self.session.send_message(
+            OutgoingMessage(
+                client_message_id="reply-1", binding_id=BindingId("binding-1"),
+                conversation_id=RemoteObjectId("888"), text="response",
+                reply_to=ReplyReference(RemoteObjectId("116974846586354125")),
+                attributes={"is_group": "true"},
+            )
+        )
+        self.assertEqual(
+            ("response", "888", "116974846586354125", ()), self.client.sent[0]
+        )
+        self.assertIsNone(self.client.forwards[0])
 
     async def test_suppresses_MAX_echo_after_xabber_group_send(self) -> None:
         await self.session.start()

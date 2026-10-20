@@ -1,4 +1,5 @@
 import asyncio
+import socket
 import unittest
 from typing import Dict, List, Optional, Sequence
 
@@ -40,9 +41,15 @@ class FakeBindingRepository:
 
 
 class FakeSession:
-    def __init__(self, binding_id: BindingId, fail_start: bool = False) -> None:
+    def __init__(
+        self, binding_id: BindingId, fail_start: bool = False,
+        start_error: Optional[Exception] = None,
+        success_event: Optional[asyncio.Event] = None,
+    ) -> None:
         self._binding_id = binding_id
         self.fail_start = fail_start
+        self.start_error = start_error
+        self.success_event = success_event
         self.started = 0
         self.closed = 0
 
@@ -55,6 +62,10 @@ class FakeSession:
         await asyncio.sleep(0)
         if self.fail_start:
             raise ConnectionError("provider details")
+        if self.start_error is not None:
+            raise self.start_error
+        if self.success_event is not None:
+            self.success_event.set()
 
     async def close(self) -> None:
         self.closed += 1
@@ -64,14 +75,16 @@ class FakeSession:
 
 
 class FakePlugin:
-    backend_id = BackendId("fake")
-
-    def __init__(self) -> None:
+    def __init__(self, backend_id: BackendId = BackendId("fake")) -> None:
+        self.backend_id = backend_id
         self.created: List[FakeSession] = []
         self.fail_start = False
+        self.start_errors: List[Exception] = []
+        self.success_event = asyncio.Event()
 
     def create_session(self, binding_id, credentials, event_sink):  # type: ignore[no-untyped-def]
-        session = FakeSession(binding_id, self.fail_start)
+        error = self.start_errors.pop(0) if self.start_errors else None
+        session = FakeSession(binding_id, self.fail_start, error, self.success_event)
         self.created.append(session)
         return session
 
@@ -141,6 +154,61 @@ class SessionSupervisorTests(unittest.IsolatedAsyncioTestCase):
         ]
         await self.supervisor.restore()
         self.assertEqual(2, len(self.plugin.created))
+        await self.supervisor.close()
+
+    async def test_max_dns_failure_retries_without_stopping_restore(self) -> None:
+        self.plugin = FakePlugin(BackendId("max"))
+        self.plugin.start_errors = [
+            socket.gaierror("temporary DNS failure"),
+            socket.gaierror("temporary DNS failure again"),
+        ]
+        self.supervisor = SessionSupervisor(
+            BackendRegistry([self.plugin]),  # type: ignore[list-item]
+            self.repository, IdentityCipher(), RecordingEventSink(),
+            restore_retry_delay=0.01,
+        )
+        self.repository.records = [BindingRecord(self.binding_id, self.plugin.backend_id)]
+
+        await self.supervisor.restore()
+        await asyncio.wait_for(self.plugin.success_event.wait(), timeout=1)
+
+        self.assertEqual(3, len(self.plugin.created))
+        self.assertEqual(1, self.plugin.created[0].closed)
+        self.assertEqual(1, self.plugin.created[1].closed)
+        await self.supervisor.close()
+        self.assertEqual(1, self.plugin.created[2].closed)
+
+    async def test_max_non_dns_failure_still_fails_restore(self) -> None:
+        self.plugin = FakePlugin(BackendId("max"))
+        self.plugin.start_errors = [PermissionError("authorization rejected")]
+        self.supervisor = SessionSupervisor(
+            BackendRegistry([self.plugin]),  # type: ignore[list-item]
+            self.repository, IdentityCipher(), RecordingEventSink(),
+            restore_retry_delay=0.01,
+        )
+        self.repository.records = [BindingRecord(self.binding_id, self.plugin.backend_id)]
+
+        with self.assertRaises(SessionLifecycleError) as context:
+            await self.supervisor.restore()
+        self.assertEqual("PermissionError", context.exception.failures[0].exception_type)
+        self.assertEqual(1, len(self.plugin.created))
+        await self.supervisor.close()
+
+    async def test_stop_cancels_pending_max_dns_retry(self) -> None:
+        self.plugin = FakePlugin(BackendId("max"))
+        self.plugin.start_errors = [socket.gaierror("temporary DNS failure")]
+        self.supervisor = SessionSupervisor(
+            BackendRegistry([self.plugin]),  # type: ignore[list-item]
+            self.repository, IdentityCipher(), RecordingEventSink(),
+            restore_retry_delay=60,
+        )
+        self.repository.records = [BindingRecord(self.binding_id, self.plugin.backend_id)]
+
+        await self.supervisor.restore()
+        await self.supervisor.stop(self.binding_id)
+
+        self.assertEqual(1, len(self.plugin.created))
+        self.assertFalse(self.supervisor._restore_retries)
         await self.supervisor.close()
 
     async def test_close_rejects_new_sessions(self) -> None:

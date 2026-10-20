@@ -9,6 +9,7 @@ from pathlib import Path
 _DIAGNOSTIC_LOGGERS = frozenset({
     "xmpp_transport.runtime.logging_config",
     "xmpp_transport.application.authentication",
+    "xmpp_transport.application.session_supervisor",
     "xmpp_transport.adapters.events.in_memory",
     "xmpp_transport.adapters.backends.max.auth",
     "xmpp_transport.adapters.backends.max.plugin",

@@ -84,6 +84,7 @@ class ReplyReference:
     sender_id: Optional[RemoteObjectId] = None
     is_self: bool = False
     media: Sequence[Media] = field(default_factory=tuple)
+    candidate_ids: Sequence[RemoteObjectId] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)

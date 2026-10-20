@@ -64,6 +64,9 @@ class XmppMessageCodec:
         element: ET.Element,
         binding_id: BindingId,
         conversation_id: RemoteObjectId,
+        *,
+        effective_to_jid: Optional[str] = None,
+        body_override: Optional[str] = None,
     ) -> OutgoingMessage:
         if _local_name(element.tag) != "message":
             raise InvalidCommand("expected an XMPP message stanza")
@@ -72,10 +75,15 @@ class XmppMessageCodec:
             raise InvalidCommand("unsupported XMPP message type")
 
         client_message_id = self._client_message_id(element)
-        body = self._body(element)
-        forwarded_from, forward_range = self._outgoing_forward(element)
+        body = self._body(element) if body_override is None else body_override
+        forwarded_from, forward_range = self._outgoing_forward(element, effective_to_jid)
         if forward_range is not None:
             body = _strip_escaped_ranges(body, (forward_range,)).strip()
+        reply, reply_range = self._reply(element, effective_to_jid)
+        if reply is not None:
+            if reply_range is not None:
+                body = _strip_escaped_ranges(body, (reply_range,))
+            body = _strip_reply_fallback_body(body)
         media = self._outgoing_media(element, body)
         if forwarded_from is not None:
             media = tuple(forwarded_from.media)
@@ -87,7 +95,6 @@ class XmppMessageCodec:
         body = body.strip()
         if not body and not media and forwarded_from is None:
             raise InvalidCommand("message must contain text or media")
-        reply = self._reply(element)
         return OutgoingMessage(
             client_message_id=client_message_id,
             binding_id=binding_id,
@@ -593,9 +600,9 @@ class XmppMessageCodec:
         return tuple(result)
 
     def _outgoing_forward(
-        self, element: ET.Element
+        self, element: ET.Element, effective_to_jid: Optional[str] = None
     ) -> tuple[Optional[ForwardReference], Optional[tuple[int, int]]]:
-        outer_to = element.attrib.get("to", "").split("/", 1)[0]
+        outer_to = (effective_to_jid or element.attrib.get("to", "")).split("/", 1)[0]
         outer_from = element.attrib.get("from", "").split("/", 1)[0]
         for reference in element:
             if reference.tag != _tag(XABBER_REFERENCES_NS, "reference"):
@@ -621,23 +628,7 @@ class XmppMessageCodec:
                         for line in inner_body.splitlines()
                         if line.strip() != item.source_url
                     )
-            origin = inner.find(_tag(SID_NS, "origin-id"))
-            stanza_ids = (
-                child.attrib.get("id")
-                for child in inner
-                if child.tag == _tag(SID_NS, "stanza-id")
-            )
-            candidate_ids = tuple(
-                dict.fromkeys(
-                    identifier
-                    for identifier in (
-                        origin.attrib.get("id") if origin is not None else None,
-                        inner.attrib.get("id"),
-                        *stanza_ids,
-                    )
-                    if identifier
-                )
-            )
+            candidate_ids = _referenced_message_ids(inner)
             message_id = inner.attrib.get("id") or (
                 candidate_ids[0] if candidate_ids else None
             )
@@ -730,18 +721,81 @@ class XmppMessageCodec:
             source_url=url,
         )
 
-    def _reply(self, element: ET.Element) -> Optional[ReplyReference]:
+    def _reply(
+        self, element: ET.Element, effective_to_jid: Optional[str] = None
+    ) -> tuple[Optional[ReplyReference], Optional[tuple[int, int]]]:
         reply = element.find(_tag(REPLY_NS, "reply"))
-        if reply is None:
-            return None
-        reply_id = reply.attrib.get("id")
-        if not reply_id:
+        reply_id = reply.attrib.get("id") if reply is not None else None
+        if reply is not None and not reply_id:
             raise InvalidCommand("reply element requires an id")
-        return ReplyReference(RemoteObjectId(_bounded_id(reply_id, self.MAX_ID_LENGTH)))
+        target = (effective_to_jid or element.attrib.get("to", "")).split("/", 1)[0]
+        for reference in element:
+            if reference.tag != _tag(XABBER_REFERENCES_NS, "reference"):
+                continue
+            forwarded = _child(reference, "forwarded", FORWARDED_NS)
+            if forwarded is None:
+                continue
+            inner = _child(forwarded, "message", CLIENT_NS)
+            if inner is None:
+                inner = _child(forwarded, "message")
+            if inner is None:
+                continue
+            inner_addresses = (
+                inner.attrib.get("from", "").split("/", 1)[0],
+                inner.attrib.get("to", "").split("/", 1)[0],
+            )
+            if not target or target not in inner_addresses:
+                continue
+            candidates = list(_referenced_message_ids(inner))
+            if reply_id and reply_id not in candidates:
+                candidates.append(reply_id)
+            if candidates:
+                return (
+                    ReplyReference(
+                        RemoteObjectId(_bounded_id(candidates[0], self.MAX_ID_LENGTH)),
+                        candidate_ids=tuple(RemoteObjectId(item) for item in candidates),
+                    ),
+                    _reference_range(reference),
+                )
+        if reply_id:
+            return ReplyReference(RemoteObjectId(_bounded_id(reply_id, self.MAX_ID_LENGTH))), None
+        return None, None
 
 
 def _tag(namespace: str, local_name: str) -> str:
     return "{{{}}}{}".format(namespace, local_name)
+
+
+def _referenced_message_ids(element: ET.Element) -> tuple[str, ...]:
+    origin_ids = (
+        child.attrib.get("id") for child in element if child.tag == _tag(SID_NS, "origin-id")
+    )
+    stanza_ids = (
+        child.attrib.get("id") for child in element if child.tag == _tag(SID_NS, "stanza-id")
+    )
+    return tuple(
+        dict.fromkeys(
+            identifier for identifier in (*origin_ids, element.attrib.get("id"), *stanza_ids)
+            if identifier
+        )
+    )
+
+
+def _strip_reply_fallback_body(body: str) -> str:
+    prefix = ""
+    quoted_body = body
+    if not quoted_body.startswith("> ") and ":\n> " in quoted_body:
+        author, separator, rest = quoted_body.partition(":\n")
+        if separator and "\n" not in author and rest.startswith("> "):
+            prefix = author + separator
+            quoted_body = rest
+    if not quoted_body.startswith("> "):
+        return body
+    lines = quoted_body.splitlines()
+    index = 0
+    while index < len(lines) and lines[index].startswith("> "):
+        index += 1
+    return prefix + "\n".join(lines[index:]).lstrip("\n") if index < len(lines) else body
 
 
 def _escaped_text_length(value: str) -> int:

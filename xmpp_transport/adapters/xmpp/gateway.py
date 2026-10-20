@@ -93,14 +93,18 @@ class XmppDirectMessageGateway:
                 return
             group_route = await self._group_route(stanza)
             if group_route is not None:
-                route, body = group_route
+                route, _ = group_route
                 message = self._codec.parse_outgoing(
-                    stanza, route.binding_id, route.conversation_id
+                    stanza, route.binding_id, route.conversation_id,
+                    effective_to_jid=stanza.attrib.get("from", ""),
                 )
+                group_text = _strip_group_author_prefix(message.text or "").strip()
+                if not group_text and not message.media and message.forwarded_from is None:
+                    raise InvalidCommand("message must contain text or media")
                 await self._messages.send(
                     replace(
                         message,
-                        text=_strip_group_author_prefix(message.text or "") or None,
+                        text=group_text or None,
                         attributes={"is_group": "true"},
                     )
                 )

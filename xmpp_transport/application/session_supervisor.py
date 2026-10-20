@@ -1,6 +1,8 @@
 """Own backend-session lifecycle without depending on concrete providers."""
 
 import asyncio
+import logging
+import socket
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type, TypeVar, cast
 
@@ -12,6 +14,7 @@ from xmpp_transport.ports.repositories import BindingRecord, BindingRepository, 
 
 
 FeatureT = TypeVar("FeatureT")
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,7 @@ class SessionSupervisor:
         bindings: BindingRepository,
         credential_cipher: CredentialCipher,
         event_sink: BackendEventSink,
+        restore_retry_delay: float = 5.0,
     ) -> None:
         self._registry = registry
         self._bindings = bindings
@@ -59,6 +63,8 @@ class SessionSupervisor:
         self._binding_locks: Dict[BindingId, asyncio.Lock] = {}
         self._state_lock = asyncio.Lock()
         self._closed = False
+        self._restore_retry_delay = restore_retry_delay
+        self._restore_retries: Dict[BindingId, asyncio.Task[None]] = {}
 
     async def start(self, binding_id: BindingId, backend_id: BackendId) -> BackendSession:
         lock = await self._lock_for(binding_id)
@@ -87,6 +93,9 @@ class SessionSupervisor:
 
             try:
                 await session.start()
+            except asyncio.CancelledError:
+                await self._close_after_failed_start(session)
+                raise
             except Exception as exc:
                 await self._close_after_failed_start(session)
                 raise SessionLifecycleError(
@@ -102,6 +111,10 @@ class SessionSupervisor:
             return session
 
     async def stop(self, binding_id: BindingId) -> None:
+        retry = self._restore_retries.pop(binding_id, None)
+        if retry is not None and retry is not asyncio.current_task():
+            retry.cancel()
+            await asyncio.gather(retry, return_exceptions=True)
         lock = await self._lock_for(binding_id)
         async with lock:
             async with self._state_lock:
@@ -136,6 +149,21 @@ class SessionSupervisor:
         failures: List[LifecycleFailure] = []
         for record, result in zip(records, results):
             if isinstance(result, BaseException):
+                if (
+                    record.backend_id == BackendId("max")
+                    and isinstance(result, SessionLifecycleError)
+                    and isinstance(_root_exception(result), socket.gaierror)
+                ):
+                    if record.binding_id not in self._restore_retries and not self._closed:
+                        self._restore_retries[record.binding_id] = asyncio.create_task(
+                            self._retry_restore(record.binding_id, record.backend_id),
+                            name="max-session-restore-retry",
+                        )
+                    log.warning(
+                        "MAX session restore deferred after DNS failure binding_id=%s",
+                        record.binding_id,
+                    )
+                    continue
                 if isinstance(result, SessionLifecycleError):
                     failures.extend(result.failures)
                 else:
@@ -149,12 +177,53 @@ class SessionSupervisor:
         if failures:
             raise SessionLifecycleError(tuple(failures))
 
+    async def _retry_restore(self, binding_id: BindingId, backend_id: BackendId) -> None:
+        delay = self._restore_retry_delay
+        try:
+            while not self._closed:
+                await asyncio.sleep(delay)
+                if self._closed:
+                    return
+                try:
+                    await self.start(binding_id, backend_id)
+                except SessionLifecycleError as exc:
+                    if not isinstance(_root_exception(exc), socket.gaierror):
+                        log.error(
+                            "MAX session restore retry stopped binding_id=%s exception_type=%s",
+                            binding_id, exc.failures[0].exception_type,
+                        )
+                        return
+                    log.warning(
+                        "MAX session restore retry deferred after DNS failure binding_id=%s",
+                        binding_id,
+                    )
+                    delay = min(delay * 2, 60.0)
+                except Exception as exc:
+                    log.error(
+                        "MAX session restore retry stopped binding_id=%s exception_type=%s",
+                        binding_id, _root_exception_type(exc),
+                    )
+                    return
+                else:
+                    log.info("MAX session restored after DNS recovery binding_id=%s", binding_id)
+                    return
+        finally:
+            if self._restore_retries.get(binding_id) is asyncio.current_task():
+                self._restore_retries.pop(binding_id, None)
+
     async def close(self) -> None:
         async with self._state_lock:
             if self._closed:
                 return
             self._closed = True
             binding_ids = tuple(self._sessions)
+
+        retries = tuple(self._restore_retries.values())
+        for retry in retries:
+            retry.cancel()
+        if retries:
+            await asyncio.gather(*retries, return_exceptions=True)
+        self._restore_retries.clear()
 
         results = await asyncio.gather(
             *(self._stop_during_close(binding_id) for binding_id in binding_ids),
@@ -208,9 +277,13 @@ class SessionSupervisor:
 
 def _root_exception_type(exc: BaseException) -> str:
     """Expose only the type of the original failure, never its possibly private text."""
+    return type(_root_exception(exc)).__name__
+
+
+def _root_exception(exc: BaseException) -> BaseException:
     seen = set()
     current = exc
     while current.__cause__ is not None and id(current.__cause__) not in seen:
         seen.add(id(current))
         current = current.__cause__
-    return type(current).__name__
+    return current

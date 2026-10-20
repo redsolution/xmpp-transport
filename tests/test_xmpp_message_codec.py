@@ -96,6 +96,117 @@ class ParseOutgoingTests(unittest.TestCase):
             ReplyReference(RemoteObjectId("remote-message-1")), message.reply_to
         )
 
+    def test_parses_xabber_direct_reply_without_sending_quoted_fallback(self) -> None:
+        stanza = ET.fromstring(
+            """
+            <message from='test13@example.com/phone' to='chat-11@max.example.com'
+                     type='chat' id='reply-1'>
+              <body>&gt; Tuesday, October 20, 2026
+&gt; [12:07:23] test13@example.com:
+&gt; test
+test123456</body>
+              <reference xmlns='https://xabber.com/protocol/references' type='mutable'>
+                <forwarded xmlns='urn:xmpp:forward:0'>
+                  <message xmlns='jabber:client' from='test13@example.com'
+                           to='chat-11@max.example.com' id='archive-1'>
+                    <origin-id xmlns='urn:xmpp:sid:0' id='client-1'/>
+                    <body>test</body>
+                  </message>
+                </forwarded>
+              </reference>
+            </message>
+            """
+        )
+
+        message = self.codec.parse_outgoing(stanza, self.binding_id, self.conversation_id)
+
+        self.assertEqual("test123456", message.text)
+        self.assertIsNone(message.forwarded_from)
+        self.assertEqual(RemoteObjectId("client-1"), message.reply_to.message_id)
+        self.assertEqual(
+            (RemoteObjectId("client-1"), RemoteObjectId("archive-1")),
+            message.reply_to.candidate_ids,
+        )
+
+    def test_standard_reply_also_removes_xabber_quoted_fallback(self) -> None:
+        stanza = ET.fromstring(
+            """
+            <message to='chat-11@max.example.com' type='chat' id='reply-2'>
+              <body>&gt; Tuesday, October 20, 2026
+&gt; [12:07:23] Alice:
+&gt; test
+response</body>
+              <reply xmlns='urn:xmpp:reply:0' id='remote-1'/>
+            </message>
+            """
+        )
+
+        message = self.codec.parse_outgoing(stanza, self.binding_id, self.conversation_id)
+
+        self.assertEqual("response", message.text)
+        self.assertEqual(RemoteObjectId("remote-1"), message.reply_to.message_id)
+
+    def test_parses_group_fanout_reply_as_reply_to_group(self) -> None:
+        group_jid = "maxg-owner-888@example.com"
+        quote = "> Tuesday, October 20, 2026\n> [12:07:23] Alice:\n> test\n"
+        stanza = ET.fromstring(
+            """
+            <message from='{group}' to='bot@max.example.com' type='chat' id='reply-2'>
+              <body>test13@example.com:\n{quote}response</body>
+              <reference xmlns='https://xabber.com/protocol/references' type='mutable'
+                         begin='0' end='{end}'>
+                <forwarded xmlns='urn:xmpp:forward:0'>
+                  <message xmlns='jabber:client' from='chat-11@max.example.com'
+                           to='{group}' id='remote-1'>
+                    <origin-id xmlns='urn:xmpp:sid:0' id='remote-1'/>
+                    <body>test</body>
+                  </message>
+                </forwarded>
+              </reference>
+            </message>
+            """.format(group=group_jid, quote=quote, end=_escaped_length(quote))
+        )
+
+        message = self.codec.parse_outgoing(
+            stanza, self.binding_id, self.conversation_id,
+            effective_to_jid=group_jid,
+            body_override=quote + "response",
+        )
+
+        self.assertEqual("response", message.text)
+        self.assertIsNone(message.forwarded_from)
+        self.assertEqual(RemoteObjectId("remote-1"), message.reply_to.message_id)
+
+    def test_parses_reply_to_own_group_message_with_xabber_origin_id(self) -> None:
+        group_jid = "maxg-owner-888@example.com"
+        stanza = ET.fromstring(
+            """
+            <message from='{group}' to='bot@max.example.com' type='chat' id='reply-3'>
+              <body>&gt; user@example.com:
+&gt; Own message
+response</body>
+              <reference xmlns='https://xabber.com/protocol/references' type='mutable'>
+                <forwarded xmlns='urn:xmpp:forward:0'>
+                  <message xmlns='jabber:client' from='user@example.com'
+                           to='{group}' id='archive-1'>
+                    <origin-id xmlns='urn:xmpp:sid:0' id='client-original-1'/>
+                    <body>Own message</body>
+                  </message>
+                </forwarded>
+              </reference>
+            </message>
+            """.format(group=group_jid)
+        )
+
+        message = self.codec.parse_outgoing(
+            stanza, self.binding_id, self.conversation_id,
+            effective_to_jid=group_jid,
+        )
+
+        self.assertEqual("response", message.text)
+        self.assertIsNone(message.forwarded_from)
+        self.assertEqual(RemoteObjectId("client-original-1"), message.reply_to.message_id)
+
     def test_rejects_missing_stable_identifier(self) -> None:
         stanza = ET.fromstring("<message type='chat'><body>Hello</body></message>")
         with self.assertRaises(InvalidCommand):

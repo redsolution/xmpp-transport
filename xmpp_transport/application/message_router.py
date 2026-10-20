@@ -78,6 +78,7 @@ class MessageRouter:
                     )
                 )
             message = await self._resolve_forward_source(message)
+            message = await self._resolve_reply_source(message)
             result = await sender.send_message(message)
             await self._mappings.save_mapping(
                 message.binding_id,
@@ -102,6 +103,19 @@ class MessageRouter:
                     message,
                     forwarded_from=replace(reference, source_message_id=remote_id),
                 )
+        return message
+
+    async def _resolve_reply_source(self, message: OutgoingMessage) -> OutgoingMessage:
+        reference = message.reply_to
+        if reference is None:
+            return message
+        candidates = reference.candidate_ids or (reference.message_id,)
+        for candidate in candidates:
+            remote_id = await self._mappings.remote_id_for_client_message(
+                message.binding_id, str(candidate)
+            )
+            if remote_id is not None:
+                return replace(message, reply_to=replace(reference, message_id=remote_id))
         return message
 
     async def receive(self, event: MessageReceived) -> bool:

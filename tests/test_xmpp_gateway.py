@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timezone
+from html import escape
 from typing import Optional, Sequence
 from xml.etree import ElementTree as ET
 
@@ -345,6 +346,94 @@ class XmppGatewayTests(unittest.IsolatedAsyncioTestCase):
         message = self.router.outgoing[0]
         self.assertIsNone(message.text)
         self.assertEqual(media_url, message.media[0].source_url)
+        self.assertEqual([], self.wire.sent)
+
+    async def test_routes_group_reply_to_max_as_reply_without_quoted_text(self) -> None:
+        control = FakeControl()
+        gateway = XmppDirectMessageGateway(
+            self.wire,
+            DirectRouteResolver(BackendId("telegram"), self.addresses, self.bindings),
+            self.addresses, self.bindings, self.router,  # type: ignore[arg-type]
+            XmppMessageCodec(), control=control,  # type: ignore[arg-type]
+            transport_namespace="urn:xabber:transport:telegram:1",
+            server_domain="example.com", group_localpart_prefix="telegramg",
+        )
+        group_jid = "telegramg-75736572406578616d706c652e636f6d-888@example.com"
+        stanza = ET.fromstring(
+            """
+            <message from='{group}' to='bot@telegram.example.com'
+                     type='chat' id='reply-1'>
+              <body>user@example.com:\n&gt; Tuesday, October 20, 2026
+&gt; [12:07:23] Alice:
+&gt; test
+response</body>
+              <x xmlns='https://xabber.com/protocol/groups'>
+                <user><jid xmlns=''>user@example.com</jid></user>
+              </x>
+              <reference xmlns='https://xabber.com/protocol/references' type='mutable'>
+                <forwarded xmlns='urn:xmpp:forward:0'>
+                  <message xmlns='jabber:client' from='chat-99@telegram.example.com'
+                           to='{group}' id='max-original-1'>
+                    <origin-id xmlns='urn:xmpp:sid:0' id='max-original-1'/>
+                    <body>test</body>
+                  </message>
+                </forwarded>
+              </reference>
+            </message>
+            """.format(group=group_jid)
+        )
+
+        await gateway.handle_stanza(stanza)
+
+        self.assertEqual(1, len(self.router.outgoing))
+        message = self.router.outgoing[0]
+        self.assertEqual("response", message.text)
+        self.assertIsNone(message.forwarded_from)
+        self.assertEqual(RemoteObjectId("max-original-1"), message.reply_to.message_id)
+        self.assertEqual("true", message.attributes["is_group"])
+        self.assertEqual([], self.wire.sent)
+
+    async def test_group_reply_reference_range_uses_original_body_offsets(self) -> None:
+        control = FakeControl()
+        gateway = XmppDirectMessageGateway(
+            self.wire,
+            DirectRouteResolver(BackendId("telegram"), self.addresses, self.bindings),
+            self.addresses, self.bindings, self.router,  # type: ignore[arg-type]
+            XmppMessageCodec(), control=control,  # type: ignore[arg-type]
+            transport_namespace="urn:xabber:transport:telegram:1",
+            server_domain="example.com", group_localpart_prefix="telegramg",
+        )
+        group_jid = "telegramg-75736572406578616d706c652e636f6d-888@example.com"
+        prefix = "user@example.com:\n"
+        quote = "> Tuesday, October 20, 2026\n> [12:37:47] Илья:\n> testtest\n"
+        stanza = ET.fromstring(
+            """
+            <message from='{group}' to='bot@telegram.example.com' type='chat' id='reply-2'>
+              <body>{body}</body>
+              <reference xmlns='https://xabber.com/protocol/references' type='mutable'
+                         begin='{begin}' end='{end}'>
+                <forwarded xmlns='urn:xmpp:forward:0'>
+                  <message xmlns='jabber:client' from='chat-99@telegram.example.com'
+                           to='{group}' id='max-original-2'>
+                    <body>testtest</body>
+                  </message>
+                </forwarded>
+              </reference>
+            </message>
+            """.format(
+                group=group_jid,
+                body=prefix + quote + "test123",
+                begin=len(escape(prefix, quote=False).encode("utf-16-le")) // 2,
+                end=len(escape(prefix + quote, quote=False).encode("utf-16-le")) // 2,
+            )
+        )
+
+        await gateway.handle_stanza(stanza)
+
+        self.assertEqual(1, len(self.router.outgoing))
+        message = self.router.outgoing[0]
+        self.assertEqual("test123", message.text)
+        self.assertEqual(RemoteObjectId("max-original-2"), message.reply_to.message_id)
         self.assertEqual([], self.wire.sent)
 
     async def test_ignores_group_service_message_without_sender_marker(self) -> None:

@@ -12,6 +12,7 @@ from xmpp_transport.domain.models import (
     IncomingMessage,
     MessageButton,
     OutgoingMessage,
+    ReplyReference,
 )
 from xmpp_transport.ports.backend import ButtonActions, MessageSender, SendResult
 
@@ -195,6 +196,25 @@ class MessageRouterTests(unittest.IsolatedAsyncioTestCase):
             RemoteObjectId("116974846586354125"),
             sender.messages[0].forwarded_from.source_message_id,
         )
+
+    async def test_reply_resolves_xabber_origin_id_to_provider_message_id(self) -> None:
+        sender = FakeSender()
+        self.features.values[(self.binding_id, MessageSender)] = sender
+        self.mappings.outgoing[(self.binding_id, "client-1")] = RemoteObjectId("max-1")
+
+        await self.router.send(
+            OutgoingMessage(
+                client_message_id="reply-1", binding_id=self.binding_id,
+                conversation_id=RemoteObjectId("11"), text="response",
+                reply_to=ReplyReference(
+                    RemoteObjectId("archive-1"),
+                    candidate_ids=(RemoteObjectId("client-1"), RemoteObjectId("archive-1")),
+                ),
+            )
+        )
+
+        self.assertEqual(RemoteObjectId("max-1"), sender.messages[0].reply_to.message_id)
+        self.assertEqual("response", sender.messages[0].text)
 
     async def test_missing_sender_feature_is_reported(self) -> None:
         with self.assertRaises(FeatureUnavailable):
