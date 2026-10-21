@@ -10,7 +10,7 @@ from xmpp_transport.domain.errors import AuthorizationRequired, TransportError
 from xmpp_transport.domain.identifiers import BackendId, BindingId
 from xmpp_transport.ports.backend import BackendPluginProvider, BackendSession
 from xmpp_transport.ports.events import BackendEventSink
-from xmpp_transport.ports.repositories import BindingRecord, BindingRepository, CredentialCipher
+from xmpp_transport.ports.repositories import BindingRepository, CredentialCipher
 
 
 FeatureT = TypeVar("FeatureT")
@@ -140,7 +140,7 @@ class SessionSupervisor:
         return cast(Optional[FeatureT], feature)
 
     async def restore(self) -> None:
-        """Start all persisted active bindings and report failures as metadata."""
+        """Restore bindings independently so one MAX account cannot block the process."""
         records = await self._bindings.active_bindings()
         results = await asyncio.gather(
             *(self.start(record.binding_id, record.backend_id) for record in records),
@@ -149,6 +149,8 @@ class SessionSupervisor:
         failures: List[LifecycleFailure] = []
         for record, result in zip(records, results):
             if isinstance(result, BaseException):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
                 root = _root_exception(result)
                 if record.backend_id == BackendId("max") and isinstance(
                     result, AuthorizationRequired
@@ -181,6 +183,15 @@ class SessionSupervisor:
                     log.warning(
                         "MAX session restore deferred binding_id=%s exception_type=%s",
                         record.binding_id, type(root).__name__,
+                    )
+                    continue
+                if record.backend_id == BackendId("max"):
+                    # Keep the binding active for the next process start, as the old
+                    # transport did for sessions with a non-authentication error.
+                    # Exception text may contain provider data, so log metadata only.
+                    log.error(
+                        "MAX session restore failed binding_id=%s exception_type=%s",
+                        record.binding_id, _root_exception_type(result),
                     )
                     continue
                 if isinstance(result, SessionLifecycleError):

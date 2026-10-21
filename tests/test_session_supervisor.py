@@ -183,20 +183,51 @@ class SessionSupervisorTests(unittest.IsolatedAsyncioTestCase):
         await self.supervisor.close()
         self.assertEqual(1, self.plugin.created[2].closed)
 
-    async def test_max_non_dns_failure_still_fails_restore(self) -> None:
+    async def test_max_non_dns_failure_does_not_stop_other_bindings(self) -> None:
         self.plugin = FakePlugin(BackendId("max"))
-        self.plugin.start_errors = [PermissionError("authorization rejected")]
+        self.plugin.start_errors = [PermissionError("private provider response")]
         self.supervisor = SessionSupervisor(
             BackendRegistry([self.plugin]),  # type: ignore[list-item]
             self.repository, IdentityCipher(), RecordingEventSink(),
             restore_retry_delay=0.01,
         )
+        second = BindingId("binding-2")
+        self.repository.credentials[second] = b"encrypted-2"
+        self.repository.records = [
+            BindingRecord(self.binding_id, self.plugin.backend_id),
+            BindingRecord(second, self.plugin.backend_id),
+        ]
+
+        with self.assertLogs(
+            "xmpp_transport.application.session_supervisor", level="ERROR"
+        ) as logs:
+            await self.supervisor.restore()
+
+        self.assertEqual(2, len(self.plugin.created))
+        self.assertEqual(1, self.plugin.created[0].closed)
+        self.assertEqual(0, self.plugin.created[1].closed)
+        self.assertNotIn(self.binding_id, self.supervisor._sessions)
+        self.assertIsNotNone(self.supervisor._sessions.get(second))
+        self.assertIn("binding_id=binding-1 exception_type=PermissionError", logs.output[0])
+        self.assertNotIn("private provider response", "\n".join(logs.output))
+
+        # The failed binding remains eligible for a fresh attempt, while the
+        # healthy binding is reused rather than opening a second MAX socket.
+        await self.supervisor.restore()
+        self.assertEqual(3, len(self.plugin.created))
+        self.assertIn(self.binding_id, self.supervisor._sessions)
+        await self.supervisor.close()
+        self.assertEqual(1, self.plugin.created[1].closed)
+        self.assertEqual(1, self.plugin.created[2].closed)
+
+    async def test_non_max_failure_still_fails_restore(self) -> None:
+        self.plugin.start_errors = [PermissionError("private provider response")]
         self.repository.records = [BindingRecord(self.binding_id, self.plugin.backend_id)]
 
         with self.assertRaises(SessionLifecycleError) as context:
             await self.supervisor.restore()
+
         self.assertEqual("PermissionError", context.exception.failures[0].exception_type)
-        self.assertEqual(1, len(self.plugin.created))
         await self.supervisor.close()
 
     async def test_expired_max_authorization_does_not_stop_restore(self) -> None:
