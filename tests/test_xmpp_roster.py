@@ -83,27 +83,27 @@ class XmppServerRosterTests(unittest.IsolatedAsyncioTestCase):
         iq = self.wire.requests[0]
         query = iq.find("{{{}}}query".format(NAMESPACE))
         assert query is not None
-        self.assertEqual(["request", "auth"], [child.tag for child in query])
-        auth = query.find("auth")
-        assert auth is not None
-        self.assertEqual("totp-sha256", auth.attrib["algorithm"])
-        self.assertEqual("30", auth.attrib["period"])
-        self.assertNotIn("signature", auth.attrib)
+        self.assertEqual(["request", "verification_code"], [child.tag for child in query])
+        verification_code = query.find("verification_code")
+        assert verification_code is not None
+        self.assertEqual("totp-sha256", verification_code.attrib["algorithm"])
+        self.assertEqual({"algorithm": "totp-sha256"}, verification_code.attrib)
+        self.assertNotIn("signature", verification_code.attrib)
         key = b"shared-roster-iq-secret-at-least-32-bytes"
         counter = 1700000010 // 30
         counter_bytes = counter.to_bytes(8, "big")
         digest = hmac.new(key, counter_bytes, hashlib.sha256).digest()
         offset = digest[-1] & 15
         code = (int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF) % 10**8
-        self.assertEqual("{:08d}".format(code), auth.text)
+        self.assertEqual("{:08d}".format(code), verification_code.text)
 
     async def test_totp_changes_after_30_seconds(self) -> None:
         with patch("xmpp_transport.adapters.xmpp.roster.time.time", return_value=1700000010):
             await self.roster.add_contact(BindingId("binding-1"), self.contact)
         with patch("xmpp_transport.adapters.xmpp.roster.time.time", return_value=1700000040):
             await self.roster.add_contact(BindingId("binding-1"), self.contact)
-        first = self.wire.requests[0].find(".//auth")
-        second = self.wire.requests[1].find(".//auth")
+        first = self.wire.requests[0].find(".//verification_code")
+        second = self.wire.requests[1].find(".//verification_code")
         assert first is not None and second is not None
         self.assertNotEqual(first.text, second.text)
         self.assertEqual(
@@ -117,8 +117,8 @@ class XmppServerRosterTests(unittest.IsolatedAsyncioTestCase):
             await self.roster.add_contact(
                 BindingId("binding-1"), Contact(RemoteObjectId("42"), "Bob")
             )
-        first = self.wire.requests[0].find(".//auth")
-        second = self.wire.requests[1].find(".//auth")
+        first = self.wire.requests[0].find(".//verification_code")
+        second = self.wire.requests[1].find(".//verification_code")
         assert first is not None and second is not None
         self.assertEqual(first.text, second.text)
         self.assertNotIn("signature", first.attrib)

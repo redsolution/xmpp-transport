@@ -93,10 +93,9 @@ class XmppServerRoster:
         code %= 10 ** self.TOTP_DIGITS
         ET.SubElement(
             query,
-            "auth",
+            "verification_code",
             {
                 "algorithm": "totp-sha256",
-                "period": str(self.TOTP_PERIOD),
             },
         ).text = "{:08d}".format(code)
         response = await self._wire.request(iq)
