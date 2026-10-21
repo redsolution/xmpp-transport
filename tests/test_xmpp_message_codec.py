@@ -308,12 +308,72 @@ https://xabber.example/upload/photo.jpg</body>
         self.assertTrue(message.forwarded_from.is_self)
         self.assertEqual("Own message", message.forwarded_from.body)
         self.assertEqual(
-            RemoteObjectId("server-copy-id"), message.forwarded_from.source_message_id
+            RemoteObjectId("original-client-id"), message.forwarded_from.source_message_id
         )
         self.assertEqual(
             (RemoteObjectId("original-client-id"), RemoteObjectId("server-copy-id"),
              RemoteObjectId("archive-id")),
             message.forwarded_from.source_message_ids,
+        )
+
+    def test_own_forward_prefers_max_origin_id_over_xabber_copy_id(self) -> None:
+        stanza = ET.fromstring(
+            """
+            <message from='user@example.com/phone' to='chat-22@max.example.com'
+                     type='chat' id='forward-2'>
+              <body>&gt; user@example.com:\n&gt; Own message\n</body>
+              <reference xmlns='https://xabber.com/protocol/references'
+                         type='mutable'>
+                <forwarded xmlns='urn:xmpp:forward:0'>
+                  <message xmlns='jabber:client' from='user@example.com/phone'
+                           to='chat-11@max.example.com' id='xabber-copy-id'>
+                    <origin-id xmlns='urn:xmpp:sid:0' id='116974846586354125'/>
+                    <body>Own message</body>
+                  </message>
+                </forwarded>
+              </reference>
+            </message>
+            """
+        )
+
+        message = self.codec.parse_outgoing(stanza, self.binding_id, self.conversation_id)
+
+        self.assertTrue(message.forwarded_from.is_self)
+        self.assertEqual(
+            RemoteObjectId("116974846586354125"),
+            message.forwarded_from.source_message_id,
+        )
+
+    def test_group_forward_recognizes_owners_message_for_id_mapping(self) -> None:
+        destination = "maxg-owner-22@example.com"
+        stanza = ET.fromstring(
+            """
+            <message from='maxg-owner-22@example.com' to='bot@max.example.com'
+                     type='chat' id='forward-group-1'>
+              <body>&gt; user@example.com:\n&gt; Own message\n</body>
+              <reference xmlns='https://xabber.com/protocol/references'
+                         type='mutable'>
+                <forwarded xmlns='urn:xmpp:forward:0'>
+                  <message xmlns='jabber:client' from='user@example.com/phone'
+                           to='maxg-owner-11@example.com' id='xabber-copy-id'>
+                    <origin-id xmlns='urn:xmpp:sid:0' id='original-client-id'/>
+                    <body>Own message</body>
+                  </message>
+                </forwarded>
+              </reference>
+            </message>
+            """
+        )
+
+        message = self.codec.parse_outgoing(
+            stanza, self.binding_id, self.conversation_id,
+            effective_to_jid=destination, owner_jid="user@example.com",
+        )
+
+        self.assertTrue(message.forwarded_from.is_self)
+        self.assertEqual(
+            RemoteObjectId("original-client-id"),
+            message.forwarded_from.source_message_id,
         )
 
     def test_rejects_empty_body(self) -> None:

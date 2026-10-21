@@ -97,6 +97,7 @@ class XmppDirectMessageGateway:
                 message = self._codec.parse_outgoing(
                     stanza, route.binding_id, route.conversation_id,
                     effective_to_jid=stanza.attrib.get("from", ""),
+                    owner_jid=route.owner_bare_jid,
                 )
                 group_text = _strip_group_author_prefix(message.text or "").strip()
                 if not group_text and not message.media and message.forwarded_from is None:

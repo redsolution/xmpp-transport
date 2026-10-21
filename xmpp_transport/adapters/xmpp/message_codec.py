@@ -66,6 +66,7 @@ class XmppMessageCodec:
         conversation_id: RemoteObjectId,
         *,
         effective_to_jid: Optional[str] = None,
+        owner_jid: Optional[str] = None,
         body_override: Optional[str] = None,
     ) -> OutgoingMessage:
         if _local_name(element.tag) != "message":
@@ -76,7 +77,9 @@ class XmppMessageCodec:
 
         client_message_id = self._client_message_id(element)
         body = self._body(element) if body_override is None else body_override
-        forwarded_from, forward_range = self._outgoing_forward(element, effective_to_jid)
+        forwarded_from, forward_range = self._outgoing_forward(
+            element, effective_to_jid, owner_jid
+        )
         if forward_range is not None:
             body = _strip_escaped_ranges(body, (forward_range,)).strip()
         reply, reply_range = self._reply(element, effective_to_jid)
@@ -600,7 +603,8 @@ class XmppMessageCodec:
         return tuple(result)
 
     def _outgoing_forward(
-        self, element: ET.Element, effective_to_jid: Optional[str] = None
+        self, element: ET.Element, effective_to_jid: Optional[str] = None,
+        owner_jid: Optional[str] = None,
     ) -> tuple[Optional[ForwardReference], Optional[tuple[int, int]]]:
         outer_to = (effective_to_jid or element.attrib.get("to", "")).split("/", 1)[0]
         outer_from = element.attrib.get("from", "").split("/", 1)[0]
@@ -629,9 +633,10 @@ class XmppMessageCodec:
                         if line.strip() != item.source_url
                     )
             candidate_ids = _referenced_message_ids(inner)
-            message_id = inner.attrib.get("id") or (
-                candidate_ids[0] if candidate_ids else None
-            )
+            # Xabber may assign its own stanza id to the archived copy of an
+            # outgoing message. The origin-id identifies the original message
+            # and must take precedence for a native MAX forward.
+            message_id = candidate_ids[0] if candidate_ids else None
             body_range = _reference_range(reference)
             return (
                 ForwardReference(
@@ -641,7 +646,9 @@ class XmppMessageCodec:
                     source_message_ids=tuple(RemoteObjectId(item) for item in candidate_ids),
                     body=inner_body.strip() or None,
                     media=media,
-                    is_self=bool(outer_from and inner_from == outer_from),
+                    is_self=bool(
+                        inner_from and inner_from in (outer_from, owner_jid)
+                    ),
                 ),
                 body_range,
             )
