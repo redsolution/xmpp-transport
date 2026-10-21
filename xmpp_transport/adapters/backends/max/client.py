@@ -1943,7 +1943,7 @@ class PersonalMaxBackend:
                     exc,
                 )
         for chat in chats:
-            if chat.chat_id in synchronized_chat_ids:
+            if chat.is_group or chat.chat_id in synchronized_chat_ids:
                 continue
             try:
                 await self._chat_handler(
@@ -1963,7 +1963,7 @@ class PersonalMaxBackend:
                     exc,
                 )
         if synchronized:
-            log.info("Synchronized %s MAX chats from snapshot", synchronized)
+            log.info("Synchronized %s MAX contacts/direct chats from snapshot", synchronized)
 
     async def _flush_pending_unknown_chat_payloads(self, chat_id: str) -> None:
         pending = self._pending_unknown_chat_payloads.pop(chat_id, [])

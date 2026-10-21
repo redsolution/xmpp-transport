@@ -182,6 +182,29 @@ class MaxWireForwardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("response", payloads[0]["message"]["text"])
 
 
+class MaxSnapshotDispatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_syncs_contacts_and_direct_chats_but_skips_groups(self) -> None:
+        client = PersonalMaxBackend(token="token", device_id="device")
+        received: list[MaxChat] = []
+
+        async def handle_chat(chat: MaxChat) -> None:
+            received.append(chat)
+
+        client.set_chat_handler(handle_chat)
+        client._snapshot_cache.address_book["user-1"] = MaxContact(
+            "user-1", "Alice", "chat-1"
+        )
+
+        await client._dispatch_snapshot_contacts([
+            MaxChat("chat-1", "Alice"),
+            MaxChat("chat-2", "Bob"),
+            MaxChat("group-1", "Group", is_group=True),
+        ])
+
+        self.assertEqual(["chat-1", "chat-2"], [chat.chat_id for chat in received])
+        self.assertTrue(all(chat.force_roster_sync for chat in received))
+
+
 class MaxBackendPluginTests(unittest.TestCase):
     def test_identifies_as_max_and_validates_session_credentials(self) -> None:
         plugin = MaxBackendPlugin()
