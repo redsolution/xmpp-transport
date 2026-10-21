@@ -149,10 +149,29 @@ class SessionSupervisor:
         failures: List[LifecycleFailure] = []
         for record, result in zip(records, results):
             if isinstance(result, BaseException):
-                if (
-                    record.backend_id == BackendId("max")
-                    and isinstance(result, SessionLifecycleError)
-                    and isinstance(_root_exception(result), socket.gaierror)
+                root = _root_exception(result)
+                if record.backend_id == BackendId("max") and isinstance(
+                    result, AuthorizationRequired
+                ):
+                    await self._bindings.mark_authorization_lost(record.binding_id)
+                    log.warning(
+                        "MAX session has no usable credentials binding_id=%s; "
+                        "send /login to authorize again",
+                        record.binding_id,
+                    )
+                    continue
+                if record.backend_id == BackendId("max") and isinstance(
+                    root, AuthorizationRequired
+                ) and getattr(root, "terminal", False):
+                    await self._bindings.mark_authorization_lost(record.binding_id)
+                    log.warning(
+                        "MAX session needs renewed authorization binding_id=%s; "
+                        "send /login to authorize again",
+                        record.binding_id,
+                    )
+                    continue
+                if record.backend_id == BackendId("max") and isinstance(
+                    root, (socket.gaierror, AuthorizationRequired)
                 ):
                     if record.binding_id not in self._restore_retries and not self._closed:
                         self._restore_retries[record.binding_id] = asyncio.create_task(
@@ -160,8 +179,8 @@ class SessionSupervisor:
                             name="max-session-restore-retry",
                         )
                     log.warning(
-                        "MAX session restore deferred after DNS failure binding_id=%s",
-                        record.binding_id,
+                        "MAX session restore deferred binding_id=%s exception_type=%s",
+                        record.binding_id, type(root).__name__,
                     )
                     continue
                 if isinstance(result, SessionLifecycleError):
@@ -187,15 +206,26 @@ class SessionSupervisor:
                 try:
                     await self.start(binding_id, backend_id)
                 except SessionLifecycleError as exc:
-                    if not isinstance(_root_exception(exc), socket.gaierror):
+                    root = _root_exception(exc)
+                    if isinstance(root, AuthorizationRequired) and getattr(
+                        root, "terminal", False
+                    ):
+                        await self._bindings.mark_authorization_lost(binding_id)
+                        log.warning(
+                            "MAX session needs renewed authorization binding_id=%s; "
+                            "send /login to authorize again",
+                            binding_id,
+                        )
+                        return
+                    if not isinstance(root, (socket.gaierror, AuthorizationRequired)):
                         log.error(
                             "MAX session restore retry stopped binding_id=%s exception_type=%s",
                             binding_id, exc.failures[0].exception_type,
                         )
                         return
                     log.warning(
-                        "MAX session restore retry deferred after DNS failure binding_id=%s",
-                        binding_id,
+                        "MAX session restore retry deferred binding_id=%s exception_type=%s",
+                        binding_id, type(root).__name__,
                     )
                     delay = min(delay * 2, 60.0)
                 except Exception as exc:
@@ -205,7 +235,7 @@ class SessionSupervisor:
                     )
                     return
                 else:
-                    log.info("MAX session restored after DNS recovery binding_id=%s", binding_id)
+                    log.info("MAX session restored binding_id=%s", binding_id)
                     return
         finally:
             if self._restore_retries.get(binding_id) is asyncio.current_task():

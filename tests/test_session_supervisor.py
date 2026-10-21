@@ -3,6 +3,7 @@ import socket
 import unittest
 from typing import Dict, List, Optional, Sequence
 
+from xmpp_transport.adapters.backends.max.models import MaxAuthorizationError
 from xmpp_transport.application.session_supervisor import (
     SessionLifecycleError,
     SessionSupervisor,
@@ -27,6 +28,7 @@ class FakeBindingRepository:
     def __init__(self) -> None:
         self.records: List[BindingRecord] = []
         self.credentials: Dict[BindingId, bytes] = {}
+        self.authorization_lost: List[BindingId] = []
 
     async def active_bindings(self) -> Sequence[BindingRecord]:
         return tuple(self.records)
@@ -38,6 +40,9 @@ class FakeBindingRepository:
         self, binding_id: BindingId, backend_id: BackendId, credentials: bytes
     ) -> None:
         self.credentials[binding_id] = credentials
+
+    async def mark_authorization_lost(self, binding_id: BindingId) -> None:
+        self.authorization_lost.append(binding_id)
 
 
 class FakeSession:
@@ -192,6 +197,54 @@ class SessionSupervisorTests(unittest.IsolatedAsyncioTestCase):
             await self.supervisor.restore()
         self.assertEqual("PermissionError", context.exception.failures[0].exception_type)
         self.assertEqual(1, len(self.plugin.created))
+        await self.supervisor.close()
+
+    async def test_expired_max_authorization_does_not_stop_restore(self) -> None:
+        self.plugin = FakePlugin(BackendId("max"))
+        self.plugin.start_errors = [MaxAuthorizationError("login.token", terminal=True)]
+        self.supervisor = SessionSupervisor(
+            BackendRegistry([self.plugin]),  # type: ignore[list-item]
+            self.repository, IdentityCipher(), RecordingEventSink(),
+        )
+        self.repository.records = [BindingRecord(self.binding_id, self.plugin.backend_id)]
+
+        await self.supervisor.restore()
+
+        self.assertEqual([self.binding_id], self.repository.authorization_lost)
+        self.assertEqual(1, self.plugin.created[0].closed)
+        self.assertFalse(self.supervisor._restore_retries)
+        await self.supervisor.close()
+
+    async def test_max_missing_credentials_requires_login(self) -> None:
+        self.plugin = FakePlugin(BackendId("max"))
+        self.supervisor = SessionSupervisor(
+            BackendRegistry([self.plugin]),  # type: ignore[list-item]
+            self.repository, IdentityCipher(), RecordingEventSink(),
+        )
+        self.repository.records = [BindingRecord(self.binding_id, self.plugin.backend_id)]
+        del self.repository.credentials[self.binding_id]
+
+        await self.supervisor.restore()
+
+        self.assertEqual([self.binding_id], self.repository.authorization_lost)
+        self.assertEqual([], self.plugin.created)
+        await self.supervisor.close()
+
+    async def test_temporary_max_authorization_error_retries(self) -> None:
+        self.plugin = FakePlugin(BackendId("max"))
+        self.plugin.start_errors = [MaxAuthorizationError("temporary rejection")]
+        self.supervisor = SessionSupervisor(
+            BackendRegistry([self.plugin]),  # type: ignore[list-item]
+            self.repository, IdentityCipher(), RecordingEventSink(),
+            restore_retry_delay=0.01,
+        )
+        self.repository.records = [BindingRecord(self.binding_id, self.plugin.backend_id)]
+
+        await self.supervisor.restore()
+        await asyncio.wait_for(self.plugin.success_event.wait(), timeout=1)
+
+        self.assertEqual(2, len(self.plugin.created))
+        self.assertEqual([], self.repository.authorization_lost)
         await self.supervisor.close()
 
     async def test_stop_cancels_pending_max_dns_retry(self) -> None:

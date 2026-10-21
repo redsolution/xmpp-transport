@@ -203,7 +203,9 @@ class SlixmppComponentWire:
         self._client = client
         connected = client.connect()
         if inspect.isawaitable(connected):
-            connected = await connected
+            connected = await asyncio.wait_for(
+                connected, timeout=self._settings.connect_timeout
+            )
         if connected is False:
             raise ConnectionError("XMPP component connection was rejected")
         await asyncio.wait_for(
@@ -221,6 +223,12 @@ class SlixmppComponentWire:
         self._client = None
         if client is None:
             return
+        # Slixmpp keeps retrying a failed connection in the background.  A
+        # timed-out client must not reconnect after a replacement is created:
+        # ejabberd can route IQ replies to that abandoned component stream.
+        cancel_attempt = getattr(client, "cancel_connection_attempt", None)
+        if cancel_attempt is not None:
+            cancel_attempt()
         result = client.disconnect()
         if inspect.isawaitable(result):
             await result

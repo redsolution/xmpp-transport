@@ -37,6 +37,7 @@ class ConnectingClient(FakeClient):
         self.connect_result = connect_result
         self.handlers = {}
         self.disconnected = 0
+        self.cancelled_attempts = 0
 
     def add_event_handler(self, name, handler) -> None:  # type: ignore[no-untyped-def]
         self.handlers[name] = handler
@@ -50,6 +51,9 @@ class ConnectingClient(FakeClient):
 
     def disconnect(self) -> None:
         self.disconnected += 1
+
+    def cancel_connection_attempt(self) -> None:
+        self.cancelled_attempts += 1
 
     def lose_connection(self) -> None:
         self.handlers["disconnected"](None)
@@ -76,6 +80,30 @@ class SlixmppComponentWireTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(2, len(clients))
         self.assertGreaterEqual(clients[0].disconnected, 1)
+        self.assertEqual(1, clients[0].cancelled_attempts)
+        await wire.close()
+
+    async def test_cancels_background_connection_after_session_timeout(self) -> None:
+        clients = []
+
+        def factory(*args):  # type: ignore[no-untyped-def]
+            client = ConnectingClient(None if not clients else True)
+            clients.append(client)
+            return client
+
+        wire = SlixmppComponentWire(
+            ComponentSettings(
+                "max.example", "secret", connect_timeout=0.02, reconnect_delay=0.01
+            ),
+            client_factory=factory,
+        )
+        wire.set_message_handler(lambda stanza: asyncio.sleep(0))
+
+        await asyncio.wait_for(wire.start(), timeout=0.5)
+
+        self.assertEqual(2, len(clients))
+        self.assertEqual(1, clients[0].cancelled_attempts)
+        self.assertEqual(1, clients[0].disconnected)
         await wire.close()
 
     async def test_reconnects_after_disconnect(self) -> None:

@@ -1,9 +1,8 @@
-import base64
 import hashlib
+import hmac
 import unittest
+from unittest.mock import patch
 from xml.etree import ElementTree as ET
-
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from xmpp_transport.adapters.xmpp.addressing import ContactAddressCodec
 from xmpp_transport.adapters.xmpp.roster import XmppServerRoster
@@ -49,23 +48,19 @@ class XmppServerRosterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.contact = Contact(RemoteObjectId("42"), "Alice")
 
-    def decrypted_request(self, iq: ET.Element) -> ET.Element:
+    def plain_request(self, iq: ET.Element) -> ET.Element:
         query = iq.find("{{{}}}query".format(NAMESPACE))
         assert query is not None
-        payload = query.find("payload")
-        assert payload is not None and payload.text is not None
-        self.assertEqual("aes-256-gcm", payload.attrib["encoding"])
-        packed = base64.b64decode(payload.text)
-        key = hashlib.sha256(
-            b"xabber-roster-iq-v1\x00shared-roster-iq-secret-at-least-32-bytes"
-        ).digest()
-        return ET.fromstring(AESGCM(key).decrypt(packed[:12], packed[12:], None))
+        self.assertIsNone(query.find("payload"))
+        request = query.find("request")
+        assert request is not None
+        return request
 
     async def test_add_contact_matches_server_module_contract(self) -> None:
         await self.roster.add_contact(BindingId("binding-1"), self.contact)
 
         iq = self.wire.requests[0]
-        query = self.decrypted_request(iq)
+        query = self.plain_request(iq)
         fields = {
             child.attrib["name"]: child.text
             for child in query
@@ -81,27 +76,53 @@ class XmppServerRosterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Alice", fields["name"])
         self.assertEqual("MAX", query.findtext("group"))
 
-    async def test_encrypted_payload_changes_for_each_request(self) -> None:
-        await self.roster.add_contact(BindingId("binding-1"), self.contact)
-        await self.roster.add_contact(BindingId("binding-1"), self.contact)
-        first = self.wire.requests[0].find(".//payload")
-        second = self.wire.requests[1].find(".//payload")
+    async def test_request_uses_30_second_totp_without_signature(self) -> None:
+        with patch("xmpp_transport.adapters.xmpp.roster.time.time", return_value=1700000010):
+            await self.roster.add_contact(BindingId("binding-1"), self.contact)
+
+        iq = self.wire.requests[0]
+        query = iq.find("{{{}}}query".format(NAMESPACE))
+        assert query is not None
+        self.assertEqual(["request", "auth"], [child.tag for child in query])
+        auth = query.find("auth")
+        assert auth is not None
+        self.assertEqual("totp-sha256", auth.attrib["algorithm"])
+        self.assertEqual("30", auth.attrib["period"])
+        self.assertNotIn("signature", auth.attrib)
+        key = b"shared-roster-iq-secret-at-least-32-bytes"
+        counter = 1700000010 // 30
+        counter_bytes = counter.to_bytes(8, "big")
+        digest = hmac.new(key, counter_bytes, hashlib.sha256).digest()
+        offset = digest[-1] & 15
+        code = (int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF) % 10**8
+        self.assertEqual("{:08d}".format(code), auth.text)
+
+    async def test_totp_changes_after_30_seconds(self) -> None:
+        with patch("xmpp_transport.adapters.xmpp.roster.time.time", return_value=1700000010):
+            await self.roster.add_contact(BindingId("binding-1"), self.contact)
+        with patch("xmpp_transport.adapters.xmpp.roster.time.time", return_value=1700000040):
+            await self.roster.add_contact(BindingId("binding-1"), self.contact)
+        first = self.wire.requests[0].find(".//auth")
+        second = self.wire.requests[1].find(".//auth")
         assert first is not None and second is not None
         self.assertNotEqual(first.text, second.text)
         self.assertEqual(
-            ET.tostring(self.decrypted_request(self.wire.requests[0])),
-            ET.tostring(self.decrypted_request(self.wire.requests[1])),
+            ET.tostring(self.plain_request(self.wire.requests[0])),
+            ET.tostring(self.plain_request(self.wire.requests[1])),
         )
 
-    async def test_modified_payload_cannot_be_decrypted(self) -> None:
-        await self.roster.add_contact(BindingId("binding-1"), self.contact)
-        payload = self.wire.requests[0].find(".//payload")
-        assert payload is not None and payload.text is not None
-        packed = bytearray(base64.b64decode(payload.text))
-        packed[-1] ^= 1
-        payload.text = base64.b64encode(packed).decode("ascii")
-        with self.assertRaises(Exception):
-            self.decrypted_request(self.wire.requests[0])
+    async def test_totp_is_the_same_for_different_fields_within_one_window(self) -> None:
+        with patch("xmpp_transport.adapters.xmpp.roster.time.time", return_value=1700000010):
+            await self.roster.add_contact(BindingId("binding-1"), self.contact)
+            await self.roster.add_contact(
+                BindingId("binding-1"), Contact(RemoteObjectId("42"), "Bob")
+            )
+        first = self.wire.requests[0].find(".//auth")
+        second = self.wire.requests[1].find(".//auth")
+        assert first is not None and second is not None
+        self.assertEqual(first.text, second.text)
+        self.assertNotIn("signature", first.attrib)
+        self.assertNotIn("signature", second.attrib)
 
     def test_rejects_empty_component_password(self) -> None:
         with self.assertRaisesRegex(ValueError, "component_password"):
@@ -119,7 +140,7 @@ class XmppServerRosterTests(unittest.IsolatedAsyncioTestCase):
     async def test_remove_contact_omits_group(self) -> None:
         await self.roster.remove_contact(BindingId("binding-1"), self.contact)
 
-        query = self.decrypted_request(self.wire.requests[0])
+        query = self.plain_request(self.wire.requests[0])
         self.assertEqual("remove-roster-contact", query.attrib["op"])
         self.assertIsNone(query.find("group"))
 

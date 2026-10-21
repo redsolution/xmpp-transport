@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from xmpp_transport.domain.errors import AuthorizationRequired
 
-class MaxAuthorizationError(RuntimeError):
+
+class MaxAuthorizationError(AuthorizationRequired):
     def __init__(self, message: str, *, terminal: bool = False):
         super().__init__(message)
         self.terminal = terminal

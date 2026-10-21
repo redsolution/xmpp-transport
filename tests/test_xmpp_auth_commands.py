@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 
@@ -81,6 +82,20 @@ class Roster:
 
     async def add_contact(self, binding_id, contact):  # type: ignore[no-untyped-def]
         self.added = (binding_id, contact)
+
+
+class BlockingRoster(Roster):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls = 0
+
+    async def add_contact(self, binding_id, contact):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        self.started.set()
+        await self.release.wait()
+        await super().add_contact(binding_id, contact)
 
 
 class Wire:
@@ -238,6 +253,55 @@ class XmppAuthenticationCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("Контакт добавлен в Xabber: Alice", response.body)
         self.assertEqual(RemoteObjectId("chat-1"), roster.added[1].id)
+
+    async def test_repeated_sync_contacts_does_not_queue_for_same_account(self) -> None:
+        roster = BlockingRoster()
+        commands = XmppAuthenticationCommands(
+            BackendId("max"),
+            "max.example.com",
+            Bindings(),  # type: ignore[arg-type]
+            Authentication(),  # type: ignore[arg-type]
+            sessions=Sessions(),  # type: ignore[arg-type]
+            roster=roster,  # type: ignore[arg-type]
+        )
+
+        first = asyncio.create_task(commands.handle("user@example.com/phone", "/sync-contacts"))
+        await asyncio.wait_for(roster.started.wait(), timeout=1)
+        duplicate = await asyncio.wait_for(
+            commands.handle("user@example.com/desktop", "/sync-contacts"), timeout=1
+        )
+
+        self.assertIn("уже выполняется", duplicate.body)
+        self.assertEqual(1, roster.calls)
+        roster.release.set()
+        self.assertIn("Синхронизировано", (await first).body)
+        self.assertIn("Синхронизировано", (
+            await commands.handle("user@example.com/desktop", "/sync-contacts")
+        ).body)
+        self.assertEqual(2, roster.calls)
+
+    async def test_cancelled_sync_contacts_can_be_started_again(self) -> None:
+        roster = BlockingRoster()
+        commands = XmppAuthenticationCommands(
+            BackendId("max"),
+            "max.example.com",
+            Bindings(),  # type: ignore[arg-type]
+            Authentication(),  # type: ignore[arg-type]
+            sessions=Sessions(),  # type: ignore[arg-type]
+            roster=roster,  # type: ignore[arg-type]
+        )
+
+        first = asyncio.create_task(commands.handle("user@example.com", "/sync-contacts"))
+        await asyncio.wait_for(roster.started.wait(), timeout=1)
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+        roster.release.set()
+
+        response = await commands.handle("user@example.com", "/sync-contacts")
+
+        self.assertIn("Синхронизировано", response.body)
+        self.assertEqual(2, roster.calls)
 
     async def test_logout_stops_session_and_disables_binding(self) -> None:
         bindings = Bindings()

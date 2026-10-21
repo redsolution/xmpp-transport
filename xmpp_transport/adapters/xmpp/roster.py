@@ -1,12 +1,10 @@
 """Roster mutations through the privileged Xabber Server helper module."""
 
-import base64
 import hashlib
-import os
+import hmac
+import time
 from typing import Protocol, Sequence
 from xml.etree import ElementTree as ET
-
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from xmpp_transport.domain.identifiers import BindingId
 from xmpp_transport.domain.models import Contact
@@ -25,6 +23,9 @@ class IqWire(Protocol):
         ...
 
 class XmppServerRoster:
+    TOTP_PERIOD = 30
+    TOTP_DIGITS = 8
+
     def __init__(
         self,
         wire: IqWire,
@@ -45,9 +46,7 @@ class XmppServerRoster:
         self._server_domain = server_domain
         self._namespace = namespace
         self._groups = tuple(groups)
-        self._encryption_key = hashlib.sha256(
-            b"xabber-roster-iq-v1\x00" + component_password.encode("utf-8")
-        ).digest()
+        self._component_password = component_password.encode("utf-8")
 
     async def add_contact(self, binding_id: BindingId, contact: Contact) -> None:
         await self._mutate("add-roster-contact", binding_id, contact)
@@ -85,13 +84,21 @@ class XmppServerRoster:
         if operation != "remove-roster-contact":
             for group_name in self._groups:
                 ET.SubElement(request, "group").text = group_name
-        nonce = os.urandom(12)
-        ciphertext = AESGCM(self._encryption_key).encrypt(
-            nonce, ET.tostring(request, encoding="utf-8"), None
-        )
-        ET.SubElement(query, "payload", {"encoding": "aes-256-gcm"}).text = (
-            base64.b64encode(nonce + ciphertext).decode("ascii")
-        )
+        query.append(request)
+        counter = int(time.time()) // self.TOTP_PERIOD
+        counter_bytes = counter.to_bytes(8, "big")
+        digest = hmac.new(self._component_password, counter_bytes, hashlib.sha256).digest()
+        offset = digest[-1] & 0x0F
+        code = int.from_bytes(digest[offset : offset + 4], "big") & 0x7FFFFFFF
+        code %= 10 ** self.TOTP_DIGITS
+        ET.SubElement(
+            query,
+            "auth",
+            {
+                "algorithm": "totp-sha256",
+                "period": str(self.TOTP_PERIOD),
+            },
+        ).text = "{:08d}".format(code)
         response = await self._wire.request(iq)
         result = response.find("{{{}}}query".format(self._namespace))
         if result is not None and result.attrib.get("status", "ok") not in {

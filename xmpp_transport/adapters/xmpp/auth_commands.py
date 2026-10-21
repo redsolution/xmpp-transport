@@ -109,6 +109,7 @@ class XmppAuthenticationCommands:
         self._contacts_page_size = contacts_page_size
         self._supports_phone_contact_addition = supports_phone_contact_addition
         self._qr_store = qr_store
+        self._syncing_contacts: set[str] = set()
 
     def accepts(self, to_jid: str) -> bool:
         return to_jid.split("/", 1)[0].strip().lower() == self._control_jid
@@ -294,17 +295,28 @@ class XmppAuthenticationCommands:
         return "Контакт добавлен в Xabber: {}".format(contact.display_name)
 
     async def _sync_contacts(self, owner: str) -> str:
-        binding, source = await self._active(owner)
-        if binding is None or source is None or self._roster is None:
-            return "{} не подключен. Отправьте /login для авторизации.".format(
+        sync_key = owner.casefold()
+        if sync_key in self._syncing_contacts:
+            return "Синхронизация контактов {} уже выполняется.".format(
                 self._provider_name
             )
-        contacts = tuple(await source.contacts())
-        for contact in contacts:
-            await self._roster.add_contact(binding.binding_id, contact)
-        return "Синхронизировано контактов {}: {}.".format(
-            self._provider_name, len(contacts)
-        )
+        # Check and reserve before the first await so repeated commands cannot
+        # queue behind contact lookup or slow roster IQ requests.
+        self._syncing_contacts.add(sync_key)
+        try:
+            binding, source = await self._active(owner)
+            if binding is None or source is None or self._roster is None:
+                return "{} не подключен. Отправьте /login для авторизации.".format(
+                    self._provider_name
+                )
+            contacts = tuple(await source.contacts())
+            for contact in contacts:
+                await self._roster.add_contact(binding.binding_id, contact)
+            return "Синхронизировано контактов {}: {}.".format(
+                self._provider_name, len(contacts)
+            )
+        finally:
+            self._syncing_contacts.discard(sync_key)
 
     async def _logout(self, owner: str) -> str:
         binding = await self._bindings.binding_for_authentication(owner, self._backend_id)
