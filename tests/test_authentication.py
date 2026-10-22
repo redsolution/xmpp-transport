@@ -1,8 +1,10 @@
 import asyncio
 import unittest
+from types import SimpleNamespace
 
+from xmpp_transport.adapters.backends.max.plugin import MaxAuthenticationFlow
 from xmpp_transport.application.authentication import AuthenticationCoordinator
-from xmpp_transport.domain.auth import AuthChallenge, AuthResponse, AuthState
+from xmpp_transport.domain.auth import AuthChallenge, AuthResponse, AuthResponseKind, AuthState
 from xmpp_transport.domain.identifiers import BackendId, BindingId
 
 
@@ -56,6 +58,7 @@ class Bindings:
         self.saved = []
         self.exclusive_saved = []
         self.displaced = ()
+        self.legacy_matcher = None
 
     async def save_encrypted_credentials(self, binding_id, backend_id, credentials):  # type: ignore[no-untyped-def]
         self.saved.append((binding_id, backend_id, credentials))
@@ -63,8 +66,7 @@ class Bindings:
     async def save_exclusive_credentials(  # type: ignore[no-untyped-def]
         self, binding_id, backend_id, credentials, remote_account_key, matches_legacy
     ):
-        assert matches_legacy(b"encrypted:private")
-        assert not matches_legacy(b"encrypted:other")
+        self.legacy_matcher = matches_legacy
         self.exclusive_saved.append(
             (binding_id, backend_id, credentials, remote_account_key)
         )
@@ -93,6 +95,47 @@ class Sessions:
 
     async def stop(self, binding_id):  # type: ignore[no-untyped-def]
         self.stopped.append(binding_id)
+
+
+class PasswordRequired(RuntimeError):
+    pass
+
+
+class LoginError(RuntimeError):
+    pass
+
+
+class QrClient:
+    def __init__(self, password_required: bool = False) -> None:
+        self.password_required = password_required
+        self.closed = 0
+
+    async def start(self):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(qr_link="https://example.test/qr", expires_at=None)
+
+    async def wait_for_credentials(self):  # type: ignore[no-untyped-def]
+        if self.password_required:
+            raise PasswordRequired("password required")
+        return "token", "device", "account"
+
+    async def submit_password(self, password):  # type: ignore[no-untyped-def]
+        if password != "correct":
+            raise LoginError("invalid password")
+        return "token", "device", "account"
+
+    async def close(self) -> None:
+        self.closed += 1
+
+
+class SocketSensitiveSessions(Sessions):
+    def __init__(self, qr_client: QrClient) -> None:
+        super().__init__()
+        self.qr_client = qr_client
+
+    async def start(self, binding_id, backend_id):  # type: ignore[no-untyped-def]
+        if self.qr_client.closed == 0:
+            raise RuntimeError("QR WebSocket is still open")
+        return await super().start(binding_id, backend_id)
 
 
 class AuthenticationCoordinatorTests(unittest.IsolatedAsyncioTestCase):
@@ -167,6 +210,51 @@ class AuthenticationCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(AuthState.EXPIRED, notices[0][1].state)
         self.assertEqual(previous, notices[0][0])
         self.assertIn("другого XMPP-пользователя", notices[0][1].message)
+        self.assertTrue(self.bindings.legacy_matcher(b"encrypted:private"))
+        self.assertFalse(self.bindings.legacy_matcher(b"encrypted:other"))
+
+    async def test_max_qr_socket_closes_before_session_starts(self) -> None:
+        await self._check_max_socket_order(password_required=False)
+
+    async def test_max_2fa_socket_closes_before_session_starts(self) -> None:
+        await self._check_max_socket_order(password_required=True)
+
+    async def _check_max_socket_order(self, password_required: bool) -> None:
+        binding_id = BindingId("binding-1")
+        backend_id = BackendId("max")
+        qr_client = QrClient(password_required)
+        sessions = SocketSensitiveSessions(qr_client)
+        self.plugin.create_authentication = lambda _binding_id: MaxAuthenticationFlow(  # type: ignore[method-assign]
+            qr_client, PasswordRequired, LoginError
+        )
+        self.coordinator = AuthenticationCoordinator(
+            Registry(self.plugin),  # type: ignore[arg-type]
+            self.bindings,  # type: ignore[arg-type]
+            Cipher(),  # type: ignore[arg-type]
+            sessions,
+        )
+        received = asyncio.Event()
+        states = []
+
+        async def handle_challenge(_binding_id, challenge):  # type: ignore[no-untyped-def]
+            states.append(challenge.state)
+            received.set()
+
+        self.coordinator._challenge_handler = handle_challenge
+        await self.coordinator.begin(binding_id, backend_id)
+        await asyncio.wait_for(received.wait(), timeout=1)
+        if password_required:
+            self.assertEqual([AuthState.WAITING_PASSWORD], states)
+            self.assertEqual(0, qr_client.closed)
+            completed = await self.coordinator.respond(
+                binding_id, backend_id, AuthResponse(AuthResponseKind.PASSWORD, "correct")
+            )
+            self.assertEqual(AuthState.CONNECTED, completed.state)
+        else:
+            self.assertEqual([AuthState.CONNECTED], states)
+
+        self.assertEqual(1, qr_client.closed)
+        self.assertEqual([(binding_id, backend_id)], sessions.started)
 
     async def test_notification_failure_does_not_fail_completed_login(self) -> None:
         binding_id = BindingId("binding-1")

@@ -136,6 +136,9 @@ class AuthenticationCoordinator:
                     await self._bindings.save_encrypted_credentials(
                         binding_id, backend_id, encrypted
                     )
+                # MAX can reject a second socket for the newly authorized web
+                # device. Release the QR connection before starting its session.
+                await flow.close()
                 for previous_binding_id in displaced:
                     await self._sessions.stop(previous_binding_id)
                     await self._deliver_challenge(
@@ -153,7 +156,6 @@ class AuthenticationCoordinator:
                 await self._sessions.start(binding_id, backend_id)
                 self._flows.pop(binding_id, None)
                 self._states.pop(binding_id, None)
-                await flow.close()
             elif challenge.state in (AuthState.EXPIRED, AuthState.FAILED):
                 self._flows.pop(binding_id, None)
                 self._states.pop(binding_id, None)
