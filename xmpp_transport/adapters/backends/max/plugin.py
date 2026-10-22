@@ -227,6 +227,14 @@ class MaxAuthenticationFlow:
             raise InvalidCommand("MAX authentication has not completed")
         return self._credentials.encode()
 
+    def remote_account_id(self) -> str:
+        if self._credentials is None:
+            raise InvalidCommand("MAX authentication has not completed")
+        return self._credentials.account_id
+
+    def matches_account(self, credentials: bytes) -> bool:
+        return MaxCredentials.decode(credentials).account_id == self.remote_account_id()
+
     async def close(self) -> None:
         if self._closed:
             return

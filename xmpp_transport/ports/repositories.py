@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, Protocol, Sequence
+from typing import Callable, Optional, Protocol, Sequence
 
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
 
@@ -45,6 +45,17 @@ class BindingRepository(Protocol):
     ) -> None:
         ...
 
+    async def save_exclusive_credentials(
+        self,
+        binding_id: BindingId,
+        backend_id: BackendId,
+        credentials: bytes,
+        remote_account_key: bytes,
+        matches_legacy: Callable[[bytes], bool],
+    ) -> Sequence[BindingId]:
+        """Atomically transfer account ownership and return displaced bindings."""
+        ...
+
     async def disable_binding(self, binding_id: BindingId) -> None:
         ...
 
@@ -58,6 +69,10 @@ class CredentialCipher(Protocol):
         ...
 
     def encrypt(self, plaintext: bytes) -> bytes:
+        ...
+
+    def remote_account_key(self, backend_id: BackendId, account_id: str) -> bytes:
+        """Derive a stable keyed digest without storing a public account ID."""
         ...
 
 

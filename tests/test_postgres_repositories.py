@@ -14,13 +14,28 @@ from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObject
 class FakePool:
     def __init__(self) -> None:
         self.rows: Sequence[Any] = ()
+        self.fetch_results: List[Sequence[Any]] = []
         self.value: Optional[Any] = None
         self.status = "UPDATE 1"
         self.row: Optional[Any] = None
         self.calls: List[Tuple[str, Tuple[object, ...]]] = []
 
+    def acquire(self):  # type: ignore[no-untyped-def]
+        return self
+
+    def transaction(self):  # type: ignore[no-untyped-def]
+        return self
+
+    async def __aenter__(self):  # type: ignore[no-untyped-def]
+        return self
+
+    async def __aexit__(self, *_args):  # type: ignore[no-untyped-def]
+        return None
+
     async def fetch(self, query: str, *args: object) -> Sequence[Any]:
         self.calls.append((query, args))
+        if self.fetch_results:
+            return self.fetch_results.pop(0)
         return self.rows
 
     async def fetchrow(self, query: str, *args: object) -> Optional[Any]:
@@ -94,6 +109,47 @@ class BindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("status = 'active'", pool.calls[0][0])
+
+    async def test_exclusive_credential_update_disables_previous_owner(self) -> None:
+        pool = FakePool()
+        pool.fetch_results = [
+            [{"binding_id": "old-owner", "encrypted_credentials": b"old-encrypted"}],
+            [{"binding_id": "old-owner"}],
+        ]
+        repository = AsyncpgBindingRepository(pool)
+
+        displaced = await repository.save_exclusive_credentials(
+            BindingId("new-owner"), BackendId("max"), b"encrypted", b"digest",
+            lambda value: value == b"old-encrypted",
+        )
+
+        self.assertEqual((BindingId("old-owner"),), displaced)
+        self.assertIn("pg_advisory_xact_lock", pool.calls[0][0])
+        self.assertEqual(("exclusive-account:max",), pool.calls[0][1])
+        self.assertIn("remote_account_key IS NULL", pool.calls[1][0])
+        self.assertIn("encrypted_credentials = NULL", pool.calls[2][0])
+        self.assertIn("status = 'disabled'", pool.calls[2][0])
+        self.assertEqual(
+            ("max", b"digest", "new-owner", ["old-owner"]), pool.calls[2][1]
+        )
+        self.assertIn("remote_account_key = $4", pool.calls[3][0])
+        self.assertEqual(("new-owner", "max", b"encrypted", b"digest"), pool.calls[3][1])
+
+    async def test_exclusive_update_keeps_unrelated_legacy_owner(self) -> None:
+        pool = FakePool()
+        pool.fetch_results = [
+            [{"binding_id": "unrelated", "encrypted_credentials": b"other-account"}],
+            [],
+        ]
+        repository = AsyncpgBindingRepository(pool)
+
+        displaced = await repository.save_exclusive_credentials(
+            BindingId("new-owner"), BackendId("max"), b"encrypted", b"digest",
+            lambda value: value == b"same-account",
+        )
+
+        self.assertEqual((), displaced)
+        self.assertEqual([], pool.calls[2][1][3])
 
     async def test_marks_active_binding_authorization_lost(self) -> None:
         pool = FakePool()

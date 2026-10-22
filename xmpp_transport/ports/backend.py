@@ -1,14 +1,13 @@
 """Small backend contracts; optional features are separate protocols."""
 
 from dataclasses import dataclass
-from typing import Mapping, Optional, Protocol, Sequence, Type, TypeVar
+from typing import Mapping, Optional, Protocol, Sequence, Type, TypeVar, runtime_checkable
 
 from xmpp_transport.domain.auth import AuthChallenge, AuthResponse
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
 from xmpp_transport.domain.models import Contact, Conversation, OutgoingMessage
 
 from .events import BackendEventSink
-
 
 FeatureT = TypeVar("FeatureT")
 
@@ -77,6 +76,17 @@ class AuthenticationFlow(Protocol):
 
     def credentials(self) -> bytes:
         """Return provider credentials only after the flow reaches CONNECTED."""
+        ...
+
+
+@runtime_checkable
+class ExclusiveAccountFlow(Protocol):
+    def remote_account_id(self) -> str:
+        """Return the personal account ID after authentication completes."""
+        ...
+
+    def matches_account(self, credentials: bytes) -> bool:
+        """Compare legacy credentials with the authenticated personal account."""
         ...
 
 

@@ -675,6 +675,9 @@ class MaxAuthenticationFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(AuthState.WAITING_QR, challenge.state)
         self.assertEqual(AuthState.CONNECTED, connected.state)
         self.assertEqual("account", MaxCredentials.decode(flow.credentials()).account_id)
+        self.assertEqual("account", flow.remote_account_id())
+        self.assertTrue(flow.matches_account(MaxCredentials("other", "device", "account").encode()))
+        self.assertFalse(flow.matches_account(MaxCredentials("other", "device", "different").encode()))
 
     async def test_qr_flow_supports_two_factor_password(self) -> None:
         client = QrClient(password_required=True)

@@ -6,11 +6,14 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, Optional, Protocol
 
 from xmpp_transport.domain.auth import AuthChallenge, AuthResponse, AuthResponseKind, AuthState
-from xmpp_transport.domain.errors import InvalidCommand
+from xmpp_transport.domain.errors import InvalidCommand, TransportError
 from xmpp_transport.domain.identifiers import BackendId, BindingId
-from xmpp_transport.ports.backend import AuthenticationFlow, BackendPluginProvider
+from xmpp_transport.ports.backend import (
+    AuthenticationFlow,
+    BackendPluginProvider,
+    ExclusiveAccountFlow,
+)
 from xmpp_transport.ports.repositories import BindingRepository, CredentialCipher
-
 
 log = logging.getLogger(__name__)
 ChallengeHandler = Callable[[BindingId, AuthChallenge], Awaitable[None]]
@@ -112,9 +115,40 @@ class AuthenticationCoordinator:
             if challenge.state is AuthState.CONNECTED:
                 plaintext = flow.credentials()
                 encrypted = self._cipher.encrypt(plaintext)
-                await self._bindings.save_encrypted_credentials(
-                    binding_id, backend_id, encrypted
-                )
+                displaced: tuple[BindingId, ...] = ()
+                if isinstance(flow, ExclusiveAccountFlow):
+                    account_key = self._cipher.remote_account_key(
+                        backend_id, flow.remote_account_id()
+                    )
+
+                    def matches_legacy(encrypted_credentials: bytes) -> bool:
+                        try:
+                            return flow.matches_account(
+                                self._cipher.decrypt(encrypted_credentials)
+                            )
+                        except (TransportError, ValueError):
+                            return False
+
+                    displaced = tuple(await self._bindings.save_exclusive_credentials(
+                        binding_id, backend_id, encrypted, account_key, matches_legacy
+                    ))
+                else:
+                    await self._bindings.save_encrypted_credentials(
+                        binding_id, backend_id, encrypted
+                    )
+                for previous_binding_id in displaced:
+                    await self._sessions.stop(previous_binding_id)
+                    await self._deliver_challenge(
+                        previous_binding_id,
+                        backend_id,
+                        AuthChallenge(
+                            AuthState.EXPIRED,
+                            message=(
+                                "MAX отключен: этот аккаунт был авторизован "
+                                "для другого XMPP-пользователя."
+                            ),
+                        ),
+                    )
                 await self._sessions.stop(binding_id)
                 await self._sessions.start(binding_id, backend_id)
                 self._flows.pop(binding_id, None)

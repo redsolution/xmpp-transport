@@ -1,6 +1,6 @@
 """PostgreSQL implementations of shared repository ports."""
 
-from typing import Any, Optional, Protocol, Sequence
+from typing import Any, Callable, Optional, Protocol, Sequence
 from uuid import uuid4
 
 from xmpp_transport.domain.errors import DuplicateOperation
@@ -9,6 +9,9 @@ from xmpp_transport.ports.repositories import BindingRecord
 
 
 class DatabasePool(Protocol):
+    def acquire(self) -> Any:
+        ...
+
     async def fetch(self, query: str, *args: object) -> Sequence[Any]:
         ...
 
@@ -200,11 +203,84 @@ class AsyncpgBindingRepository:
         if status != "UPDATE 1":
             raise LookupError("binding not found for credential update: {}".format(binding_id))
 
+    async def save_exclusive_credentials(
+        self,
+        binding_id: BindingId,
+        backend_id: BackendId,
+        credentials: bytes,
+        remote_account_key: bytes,
+        matches_legacy: Callable[[bytes], bool],
+    ) -> Sequence[BindingId]:
+        if not remote_account_key:
+            raise ValueError("remote account key must not be empty")
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                # Legacy rows have no identity key, so serialize all transfers for
+                # this backend while they are compared and claimed.
+                await connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1))",
+                    "exclusive-account:{}".format(backend_id),
+                )
+                legacy_rows = await connection.fetch(
+                    """
+                    SELECT binding_id, encrypted_credentials
+                    FROM backend_bindings
+                    WHERE backend_id = $1 AND binding_id <> $2
+                      AND status = 'active' AND remote_account_key IS NULL
+                      AND encrypted_credentials IS NOT NULL
+                    FOR UPDATE
+                    """,
+                    str(backend_id),
+                    str(binding_id),
+                )
+                legacy_ids = [
+                    str(row["binding_id"])
+                    for row in legacy_rows
+                    if matches_legacy(bytes(row["encrypted_credentials"]))
+                ]
+                rows = await connection.fetch(
+                    """
+                    UPDATE backend_bindings
+                    SET encrypted_credentials = NULL,
+                        remote_account_key = NULL,
+                        status = 'disabled',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE backend_id = $1
+                      AND (remote_account_key = $2 OR binding_id = ANY($4::text[]))
+                      AND binding_id <> $3 AND status <> 'disabled'
+                    RETURNING binding_id
+                    """,
+                    str(backend_id),
+                    remote_account_key,
+                    str(binding_id),
+                    legacy_ids,
+                )
+                status = await connection.execute(
+                    """
+                    UPDATE backend_bindings
+                    SET encrypted_credentials = $3,
+                        remote_account_key = $4,
+                        status = 'active',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE binding_id = $1 AND backend_id = $2
+                    """,
+                    str(binding_id),
+                    str(backend_id),
+                    credentials,
+                    remote_account_key,
+                )
+                if status != "UPDATE 1":
+                    raise LookupError(
+                        "binding not found for credential update: {}".format(binding_id)
+                    )
+        return tuple(BindingId(str(row["binding_id"])) for row in rows)
+
     async def disable_binding(self, binding_id: BindingId) -> None:
         status = await self._pool.execute(
             """
             UPDATE backend_bindings
             SET encrypted_credentials = NULL,
+                remote_account_key = NULL,
                 status = 'disabled',
                 updated_at = CURRENT_TIMESTAMP
             WHERE binding_id = $1
