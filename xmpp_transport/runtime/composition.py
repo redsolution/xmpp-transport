@@ -351,6 +351,9 @@ def compose_single_backend(
             backend.options.get("component_reconnect_delay", "5"),
             "component_reconnect_delay",
         ),
+        tls=_boolean(backend.options.get("component_tls", "false"), "component_tls"),
+        tls_server_name=backend.options.get("component_tls_server_name") or None,
+        tls_ca_file=backend.options.get("component_tls_ca_file"),
     )
     http_host = backend.options.get("http_host", config.http.host).strip()
     if not http_host:
@@ -415,6 +418,15 @@ def _positive_int(value: str, name: str) -> int:
     if parsed <= 0:
         raise ValueError("{} must be positive".format(name))
     return parsed
+
+
+def _boolean(value: str, name: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"true", "yes", "on", "1"}:
+        return True
+    if normalized in {"false", "no", "off", "0"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
 
 
 def _nonnegative_int(value: str, name: str) -> int:

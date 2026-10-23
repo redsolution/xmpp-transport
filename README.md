@@ -42,6 +42,33 @@ The command creates `transports.ini` with mode `0600`. It refuses to overwrite
 an existing file unless `--force` is passed. Use `--database-dsn`,
 `--server-domain`, `--server-ip`, or `--output` to override defaults.
 
+## Component TLS
+
+The component connection can use direct TLS when the matching component listener
+in Xabber Server has `tls: true`. Enable it in the backend section:
+
+```ini
+server_ip = 127.0.0.1
+server_port = 5237
+component_tls = true
+component_tls_server_name = xmpp.example.com
+# component_tls_ca_file = /path/to/private-ca.pem
+```
+
+`server_ip` remains the TCP address and may be an IP address.
+`component_tls_server_name` is the DNS name that the server certificate must
+cover, even when connecting to `127.0.0.1`. The transport verifies the
+certificate name and chain; use `component_tls_ca_file` only for a private CA.
+With no CA file, system trust roots are used. A missing or empty CA file is a
+configuration error. TLS failures never fall back to a plaintext connection.
+The default `component_tls = false` preserves existing configuration until the
+listener and transport are switched together.
+
+The config generator accepts `--component-tls --component-tls-server-name
+xmpp.example.com` and optionally `--component-tls-ca-file /path/to/ca.pem`.
+It writes those options to each generated backend section. Use `--check-config`
+to validate settings without opening an XMPP connection.
+
 Login QR codes are generated as SVG files without Pillow, stored under each
 backend's `qr_storage_dir`, and served by the transport at `/qr/`. Set
 `qr_base_url` to the externally reachable HTTP base URL. Expired files are

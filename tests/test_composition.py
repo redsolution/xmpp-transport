@@ -1,11 +1,18 @@
 import unittest
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List
 
 from cryptography.fernet import Fernet
 
 from xmpp_transport.adapters.events import InMemoryEventBus
-from xmpp_transport.domain.events import BackendEvent, EventEnvelope, SessionState, SessionStateChanged
+from xmpp_transport.domain.events import (
+    BackendEvent,
+    EventEnvelope,
+    SessionState,
+    SessionStateChanged,
+)
 from xmpp_transport.domain.identifiers import BackendId, BindingId, EventId
 from xmpp_transport.runtime.composition import EventSinkRelay, compose_single_backend
 from xmpp_transport.runtime.config import (
@@ -61,6 +68,45 @@ class EventSinkRelayTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CompositionTests(unittest.TestCase):
+    def test_component_tls_settings_are_wired_and_validated(self) -> None:
+        key = Fernet.generate_key().decode("ascii")
+        environment = {"FAKE_COMPONENT_PASSWORD": "secret", "CREDENTIAL_KEY": key}
+
+        def compose(options):  # type: ignore[no-untyped-def]
+            config = RuntimeConfig(
+                backends=(BackendConfig("fake", "fake.example.com", options),),
+                database=DatabaseConfig("postgresql://user:private@db/transport"),
+                credential_key_env="CREDENTIAL_KEY",
+            )
+            return compose_single_backend(config, FakePlugin(), environment)  # type: ignore[arg-type]
+
+        base = {"component_password_env": "FAKE_COMPONENT_PASSWORD"}
+        self.assertFalse(compose(base)._wire._settings.tls)
+        with tempfile.TemporaryDirectory() as directory:
+            ca_file = Path(directory) / "ca.pem"
+            ca_file.write_text("test CA placeholder", encoding="ascii")
+            options = dict(base, component_tls="true", component_tls_server_name="xmpp.example.com",
+                           component_tls_ca_file=str(ca_file), server_ip="127.0.0.1")
+            settings = compose(options)._wire._settings
+            self.assertTrue(settings.tls)
+            self.assertEqual("127.0.0.1", settings.host)
+            self.assertEqual("xmpp.example.com", settings.tls_server_name)
+            self.assertEqual(str(ca_file), settings.tls_ca_file)
+
+        for overrides, error in (
+            ({"component_tls": "maybe"}, "component_tls"),
+            ({"component_tls": "true"}, "tls_server_name"),
+            ({"component_tls": "true", "component_tls_server_name": " "}, "tls_server_name"),
+            ({"component_tls": "false", "component_tls_server_name": "xmpp.example.com"},
+             "TLS options require TLS"),
+            ({"component_tls": "true", "component_tls_server_name": "xmpp.example.com",
+              "component_tls_ca_file": ""}, "tls_ca_file"),
+            ({"component_tls": "true", "component_tls_server_name": "xmpp.example.com",
+              "component_tls_ca_file": "/missing/ca.pem"}, "tls_ca_file"),
+        ):
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(ValueError, error):
+                compose(dict(base, **overrides))
+
     def test_builds_single_backend_without_importing_optional_runtime_drivers(self) -> None:
         key = Fernet.generate_key().decode("ascii")
         config = RuntimeConfig(

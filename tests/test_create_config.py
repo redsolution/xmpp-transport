@@ -25,6 +25,7 @@ class CreateConfigTests(unittest.TestCase):
                 self.assertIsNotNone(config.database)
                 self.assertNotIn("iq_auth_secret", path.read_text(encoding="utf-8"))
                 self.assertEqual(secret_count, len(calls))
+                self.assertEqual("false", config.backends[0].options["component_tls"])
                 self.assertEqual(
                     backend == "telegram", "api_id" in config.backends[0].options
                 )
@@ -40,6 +41,20 @@ class CreateConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 create_config(args)
             self.assertEqual("existing settings", path.read_text(encoding="utf-8"))
+
+    def test_generates_component_tls_options_for_selected_backend(self) -> None:
+        args = parse_args((
+            "--backend", "max", "--component-tls",
+            "--component-tls-server-name", "xmpp.example.com",
+            "--component-tls-ca-file", "/etc/xabber/private-ca.pem",
+        ))
+        content = build_config(args, secret_factory=lambda _size: "secret")
+        self.assertIn("component_tls = true\n", content)
+        self.assertIn("component_tls_server_name = xmpp.example.com\n", content)
+        self.assertIn("component_tls_ca_file = /etc/xabber/private-ca.pem\n", content)
+        self.assertNotIn("[backend:telegram]", content)
+        with self.assertRaisesRegex(ValueError, "component-tls-server-name"):
+            build_config(parse_args(("--component-tls",)))
 
     def _args(self, output: Path):  # type: ignore[no-untyped-def]
         return parse_args(

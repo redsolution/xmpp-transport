@@ -20,6 +20,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=Path("transports.ini"))
     parser.add_argument("--server-domain", default="example.com")
     parser.add_argument("--server-ip", default="127.0.0.1")
+    parser.add_argument(
+        "--component-tls", action="store_true",
+        help="enable direct TLS for generated component connections",
+    )
+    parser.add_argument("--component-tls-server-name")
+    parser.add_argument("--component-tls-ca-file")
     parser.add_argument("--database-dsn", default=(
         "postgresql://transport_user:transport_password@127.0.0.1:5432/"
         "xmpp_transport"
@@ -45,6 +51,24 @@ def build_config(
         "database_dsn": _ini_value(args.database_dsn, "database-dsn"),
         "credential_key": credential_key or Fernet.generate_key().decode("ascii"),
     }
+    if args.component_tls:
+        if args.component_tls_server_name is None:
+            raise ValueError("component-tls-server-name is required with component-tls")
+        tls_options = (
+            "component_tls = true\n"
+            "component_tls_server_name = {}\n".format(
+                _ini_value(args.component_tls_server_name, "component-tls-server-name")
+            )
+        )
+        if args.component_tls_ca_file is not None:
+            tls_options += "component_tls_ca_file = {}\n".format(
+                _ini_value(args.component_tls_ca_file, "component-tls-ca-file")
+            )
+    else:
+        if args.component_tls_server_name is not None or args.component_tls_ca_file is not None:
+            raise ValueError("component TLS options require --component-tls")
+        tls_options = "component_tls = false\n"
+    values["component_tls_options"] = tls_options
     sections = []
     if args.backend in (None, "max"):
         sections.append(_max_config(values, secret_factory))
@@ -60,7 +84,7 @@ def _max_config(values: dict[str, str], secret_factory: Callable[[int], str]) ->
 component_jid = max.{server_domain}
 server_ip = {server_ip}
 server_port = 5237
-component_connect_timeout = 20
+{component_tls_options}component_connect_timeout = 20
 component_password = {max_component_password}
 control_localpart = bot
 server_domain = {server_domain}
@@ -92,7 +116,7 @@ def _telegram_config(
 component_jid = telegram.{server_domain}
 server_ip = {server_ip}
 server_port = 5238
-component_connect_timeout = 20
+{component_tls_options}component_connect_timeout = 20
 component_password = {telegram_component_password}
 control_localpart = bot
 server_domain = {server_domain}

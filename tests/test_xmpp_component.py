@@ -1,4 +1,5 @@
 import asyncio
+import ssl
 import unittest
 from xml.etree import ElementTree as ET
 
@@ -32,12 +33,15 @@ class FakeClient:
 
 
 class ConnectingClient(FakeClient):
-    def __init__(self, connect_result=True) -> None:  # type: ignore[no-untyped-def]
+    def __init__(self, connect_result=True, *, tls_active=False) -> None:  # type: ignore[no-untyped-def]
         super().__init__()
         self.connect_result = connect_result
         self.handlers = {}
         self.disconnected = 0
         self.cancelled_attempts = 0
+        self.aborted = 0
+        self.starttls_services = set()
+        self.transport = FakeTransport(tls_active)
 
     def add_event_handler(self, name, handler) -> None:  # type: ignore[no-untyped-def]
         self.handlers[name] = handler
@@ -55,11 +59,118 @@ class ConnectingClient(FakeClient):
     def cancel_connection_attempt(self) -> None:
         self.cancelled_attempts += 1
 
+    def abort(self) -> None:
+        self.aborted += 1
+
     def lose_connection(self) -> None:
         self.handlers["disconnected"](None)
 
 
+class FakeTransport:
+    def __init__(self, tls_active: bool) -> None:
+        self.tls_active = tls_active
+
+    def get_extra_info(self, name: str):  # type: ignore[no-untyped-def]
+        return object() if name == "ssl_object" and self.tls_active else None
+
+
 class SlixmppComponentWireTests(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_tls_uses_server_name_without_plaintext_fallback(self) -> None:
+        from slixmpp import ComponentXMPP
+
+        settings = ComponentSettings(
+            "max.example", "secret", host="127.0.0.1", port=5237,
+            tls=True, tls_server_name="xmpp.example.com",
+        )
+        wire = SlixmppComponentWire(settings)
+        client = ComponentXMPP(settings.domain, settings.secret, settings.host, settings.port)
+        wire._configure_tls(client)
+
+        self.assertTrue(client.enable_direct_tls)
+        self.assertFalse(client.enable_starttls)
+        self.assertFalse(client.enable_plaintext)
+        self.assertEqual("xmpp.example.com", client.default_domain)
+        self.assertTrue(client.ssl_context.check_hostname)
+        self.assertEqual(ssl.CERT_REQUIRED, client.ssl_context.verify_mode)
+
+        attempts = []
+        successful = [True]
+
+        async def attempt(host, port, tls, server_name):  # type: ignore[no-untyped-def]
+            attempts.append((host, port, tls, server_name))
+            return successful[0]
+
+        client.custom_address = (settings.host, settings.port)
+        client._attempt_connection = attempt
+        await client._connect_loop()
+        self.assertEqual(
+            [("127.0.0.1", 5237, True, "xmpp.example.com")], attempts
+        )
+        attempts.clear()
+        successful[0] = False
+        await client._connect_loop()
+        self.assertEqual(
+            [("127.0.0.1", 5237, True, "xmpp.example.com")], attempts
+        )
+
+    async def test_tls_requires_certificate_name(self) -> None:
+        with self.assertRaisesRegex(ValueError, "tls_server_name"):
+            ComponentSettings("max.example", "secret", tls=True)
+
+    async def test_tls_session_is_ready_only_after_verified_transport(self) -> None:
+        clients = []
+
+        def factory(*args):  # type: ignore[no-untyped-def]
+            client = ConnectingClient(tls_active=bool(clients))
+            clients.append(client)
+            return client
+
+        wire = SlixmppComponentWire(
+            ComponentSettings(
+                "max.example", "secret", connect_timeout=0.02,
+                reconnect_delay=0.01, tls=True,
+                tls_server_name="xmpp.example.com",
+            ),
+            client_factory=factory,
+        )
+        wire.set_message_handler(lambda stanza: asyncio.sleep(0))
+
+        await asyncio.wait_for(wire.start(), timeout=0.5)
+
+        self.assertEqual(2, len(clients))
+        self.assertEqual(1, clients[0].aborted)
+        self.assertEqual(1, clients[0].disconnected)
+        self.assertEqual(0, clients[1].aborted)
+        for client in clients:
+            self.assertTrue(client.enable_direct_tls)
+            self.assertFalse(client.enable_plaintext)
+            self.assertFalse(client.enable_starttls)
+            self.assertEqual("xmpp.example.com", client.default_domain)
+            self.assertEqual(ssl.CERT_REQUIRED, client.ssl_context.verify_mode)
+        clients[0].lose_connection()
+        self.assertTrue(wire._ready.is_set())
+        await wire.close()
+
+    async def test_tls_send_and_request_reject_unencrypted_transport(self) -> None:
+        wire = SlixmppComponentWire(
+            ComponentSettings(
+                "max.example", "secret", tls=True,
+                tls_server_name="xmpp.example.com",
+            )
+        )
+        client = ConnectingClient(tls_active=False)
+        wire._client = client
+        wire._ready = asyncio.Event()
+        wire._ready.set()
+
+        with self.assertRaises(ConnectionError):
+            await wire.send(ET.Element("message"))
+        self.assertIsNone(client.message)
+        wire._ready.set()
+        with self.assertRaises(ConnectionError):
+            await wire.request(ET.Element("iq", {"type": "set"}))
+        self.assertFalse(wire._ready.is_set())
+
     async def test_retries_initial_connection_failure(self) -> None:
         clients = []
 

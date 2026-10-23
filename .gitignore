@@ -16,3 +16,4 @@ logs/
 *.pid
 *.egg-info/
 deploy/systemd/*.service
+local-tls/

@@ -3,7 +3,10 @@
 import asyncio
 import inspect
 import logging
+import ssl
 from dataclasses import dataclass, field
+from functools import partial
+from pathlib import Path
 from typing import Any, Callable, Optional
 from xml.etree import ElementTree as ET
 
@@ -20,6 +23,9 @@ class ComponentSettings:
     port: int = 5347
     connect_timeout: float = 15.0
     reconnect_delay: float = 5.0
+    tls: bool = False
+    tls_server_name: Optional[str] = None
+    tls_ca_file: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.domain.strip() or not self.secret:
@@ -30,6 +36,13 @@ class ComponentSettings:
             raise ValueError("component connect_timeout must be positive")
         if self.reconnect_delay <= 0:
             raise ValueError("component reconnect_delay must be positive")
+        if self.tls and (self.tls_server_name is None or not self.tls_server_name.strip()):
+            raise ValueError("component tls_server_name is required when TLS is enabled")
+        if not self.tls and (self.tls_server_name is not None or self.tls_ca_file is not None):
+            raise ValueError("component TLS options require TLS to be enabled")
+        if self.tls_ca_file is not None:
+            if not self.tls_ca_file.strip() or not Path(self.tls_ca_file).is_file():
+                raise ValueError("component tls_ca_file must be an existing file")
 
 
 class SlixmppComponentWire:
@@ -73,10 +86,7 @@ class SlixmppComponentWire:
         await self._ready.wait()
 
     async def send(self, element: ET.Element) -> None:
-        client = self._client
-        ready = self._ready
-        if client is None or ready is None or not ready.is_set():
-            raise ConnectionError("XMPP component is not connected")
+        client = self._connected_client()
         if element.tag.rsplit("}", 1)[-1] == "message":
             body = next(
                 (
@@ -105,10 +115,7 @@ class SlixmppComponentWire:
     async def request(self, element: ET.Element, timeout: float = 10.0) -> ET.Element:
         if element.tag.rsplit("}", 1)[-1] != "iq":
             raise ValueError("XMPP request must be an IQ stanza")
-        client = self._client
-        ready = self._ready
-        if client is None or ready is None or not ready.is_set():
-            raise ConnectionError("XMPP component is not connected")
+        client = self._connected_client()
         children = tuple(element)
         if len(children) != 1:
             raise ValueError("XMPP IQ request must contain one payload element")
@@ -139,18 +146,52 @@ class SlixmppComponentWire:
             await asyncio.gather(task, return_exceptions=True)
         await self._disconnect_client()
 
-    async def _on_session_start(self, event: object) -> None:
+    def _connected_client(self) -> Any:
+        client = self._client
+        ready = self._ready
+        if client is None or ready is None or not ready.is_set():
+            raise ConnectionError("XMPP component is not connected")
+        if self._settings.tls and not self._has_tls(client):
+            ready.clear()
+            raise ConnectionError("XMPP component TLS connection is unavailable")
+        return client
+
+    @staticmethod
+    def _has_tls(client: Any) -> bool:
+        transport = getattr(client, "transport", None)
+        return (
+            transport is not None
+            and transport.get_extra_info("ssl_object") is not None
+        )
+
+    async def _on_session_start(self, client: Any, event: object) -> None:
+        if self._closed or client is not self._client:
+            return
+        if self._settings.tls and not self._has_tls(client):
+            log.warning(
+                "XMPP component session rejected domain=%s reason=tls_unavailable",
+                self._settings.domain,
+            )
+            client.abort()
+            return
         if self._ready is not None:
             self._ready.set()
 
-    def _on_disconnected(self, event: object) -> None:
+    def _on_disconnected(self, client: Any, event: object) -> None:
+        if client is not self._client:
+            return
         if self._ready is not None:
             self._ready.clear()
         if self._disconnected is not None:
             self._disconnected.set()
 
-    async def _on_message(self, stanza: Any) -> None:
-        if self._handler is not None:
+    async def _on_message(self, client: Any, stanza: Any) -> None:
+        if client is not self._client:
+            return
+        if self._ready is not None and self._ready.is_set() and self._handler is not None:
+            if self._settings.tls and not self._has_tls(client):
+                self._ready.clear()
+                return
             await self._handler(stanza.xml)
 
     async def _connection_loop(self) -> None:
@@ -197,9 +238,10 @@ class SlixmppComponentWire:
             self._settings.host,
             self._settings.port,
         )
-        client.add_event_handler("session_start", self._on_session_start)
-        client.add_event_handler("disconnected", self._on_disconnected)
-        client.add_event_handler("message", self._on_message)
+        self._configure_tls(client)
+        client.add_event_handler("session_start", partial(self._on_session_start, client))
+        client.add_event_handler("disconnected", partial(self._on_disconnected, client))
+        client.add_event_handler("message", partial(self._on_message, client))
         self._client = client
         connected = client.connect()
         if inspect.isawaitable(connected):
@@ -218,6 +260,23 @@ class SlixmppComponentWire:
             self._settings.port,
         )
 
+    def _configure_tls(self, client: Any) -> None:
+        if not self._settings.tls:
+            return
+        # ComponentXMPP 1.10 defaults to plaintext. With a custom host/port,
+        # XMLStream uses tls_services to select direct TLS. Clearing the other
+        # modes makes a failed TLS handshake fail closed on every retry.
+        client.tls_services = {"xmpps-component"}
+        client.starttls_services.clear()
+        client.enable_direct_tls = True
+        client.enable_starttls = False
+        client.enable_plaintext = False
+        client.default_domain = self._settings.tls_server_name
+        context = ssl.create_default_context(cafile=self._settings.tls_ca_file)
+        context.verify_mode = ssl.CERT_REQUIRED
+        context.check_hostname = True
+        client.ssl_context = context
+
     async def _disconnect_client(self) -> None:
         client = self._client
         self._client = None
@@ -232,3 +291,9 @@ class SlixmppComponentWire:
         result = client.disconnect()
         if inspect.isawaitable(result):
             await result
+        # Slixmpp's outbound filter loop survives disconnect(), including
+        # failed TLS handshakes. This client is never reused after a retry.
+        filter_task = getattr(client, "_run_out_filters", None)
+        if filter_task is not None and not filter_task.done():
+            filter_task.cancel()
+            await asyncio.gather(filter_task, return_exceptions=True)
